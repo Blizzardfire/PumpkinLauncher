@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="@drawable/sticky_purple"
+    android:padding="14dp"
+    android:layout_marginBottom="10dp">
+
+    <TextView
+        android:id="@+id/pluginNameText"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:textColor="@color/pumpkin_black"
+        android:textStyle="bold"
+        android:textSize="16sp"
+        android:fontFamily="@font/sora" />
+
+    <Button
+        android:id="@+id/removePluginButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Remove"
+        android:textColor="@color/pumpkin_black"
+        android:background="@drawable/sticky_pink"
+        app:backgroundTint="@null"
+        android:fontFamily="@font/sora" />
+
+</LinearLayout>

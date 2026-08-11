@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="@color/pumpkin_black"
+    android:padding="24dp">
+
+    <ImageView
+        android:layout_width="96dp"
+        android:layout_height="96dp"
+        android:src="@mipmap/ic_pumpkin"
+        android:layout_marginBottom="16dp"
+        android:contentDescription="Pumpkin logo" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Pumpkin Server Launcher"
+        android:textColor="@color/white"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:paddingBottom="8dp"
+        android:fontFamily="@font/sora" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="This app runs the Pumpkin Minecraft server, an open-source project built independently of this launcher."
+        android:textColor="#CCCCCC"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:paddingBottom="24dp"
+        android:fontFamily="@font/sora" />
+
+    <Button
+        android:id="@+id/websiteButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="10dp"
+        android:text="Pumpkin Website"
+        android:textColor="@color/pumpkin_black"
+        android:textStyle="bold"
+        android:background="@drawable/sticky_orange"
+        app:backgroundTint="@null"
+        android:fontFamily="@font/sora" />
+
+    <Button
+        android:id="@+id/githubButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="10dp"
+        android:text="GitHub / Source"
+        android:textColor="@color/pumpkin_black"
+        android:textStyle="bold"
+        android:background="@drawable/sticky_blue"
+        app:backgroundTint="@null"
+        android:fontFamily="@font/sora" />
+
+    <Button
+        android:id="@+id/discordButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="24dp"
+        android:text="Discord Community"
+        android:textColor="@color/pumpkin_black"
+        android:textStyle="bold"
+        android:background="@drawable/sticky_purple"
+        app:backgroundTint="@null"
+        android:fontFamily="@font/sora" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="GPL Licensed. Not affiliated with Mojang."
+        android:textColor="#888888"
+        android:textSize="11sp"
+        android:paddingBottom="16dp"
+        android:fontFamily="@font/sora" />
+
+    <Button
+        android:id="@+id/continueButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Continue"
+        android:textColor="@color/pumpkin_black"
+        android:textStyle="bold"
+        android:background="@drawable/sticky_yellow"
+        app:backgroundTint="@null"
+        android:fontFamily="@font/sora" />
+
+</LinearLayout>

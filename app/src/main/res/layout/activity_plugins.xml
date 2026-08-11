@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/pumpkin_black"
+    android:padding="12dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingBottom="12dp">
+
+        <Button
+            android:id="@+id/backButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="← Back"
+            android:textColor="@color/pumpkin_black"
+            android:background="@drawable/sticky_orange"
+            app:backgroundTint="@null"
+            android:fontFamily="@font/sora" />
+
+        <TextView
+            android:id="@+id/pluginsTitleText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="12dp"
+            android:text="Plugins"
+            android:textColor="@color/white"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:fontFamily="@font/sora" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@color/pumpkin_dark_gray"
+        android:padding="10dp"
+        android:layout_marginBottom="10dp">
+
+        <TextView
+            android:id="@+id/activeStatusText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="@color/white"
+            android:textSize="14sp"
+            android:fontFamily="@font/sora" />
+
+        <Button
+            android:id="@+id/setActiveButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Set Active"
+            android:textColor="@color/pumpkin_black"
+            android:background="@drawable/sticky_pink"
+            app:backgroundTint="@null"
+            android:fontFamily="@font/sora" />
+
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/serverSettingsButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Server Settings"
+        android:textColor="@color/pumpkin_black"
+        android:textStyle="bold"
+        android:background="@drawable/sticky_yellow"
+        app:backgroundTint="@null"
+        android:layout_marginBottom="10dp"
+        android:fontFamily="@font/sora" />
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/pluginsRecyclerView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <Button
+        android:id="@+id/importPluginButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="+ Import Plugin (.wasm)"
+        android:textColor="@color/pumpkin_black"
+        android:textStyle="bold"
+        android:background="@drawable/sticky_green"
+        app:backgroundTint="@null"
+        android:fontFamily="@font/sora" />
+
+</LinearLayout>
