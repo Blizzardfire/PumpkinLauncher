@@ -1,4 +1,4 @@
-# Building Pumpkin Launcher (Command Line, No Android Studio Required)
+# Building Pumpkin Launcher
 
 This covers building the native Pumpkin server binaries, packaging the Android
 app, and installing it — all from a terminal.
