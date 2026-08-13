@@ -1,3 +1,5 @@
+# Building Pumpkin Launcher
+
 This covers building the native Pumpkin server binaries, packaging the Android
 app, and installing it — all from a terminal.
 
@@ -5,7 +7,7 @@ app, and installing it — all from a terminal.
 
 Pre-built Android binaries (`libpumpkin.so` for `arm64-v8a`, `armeabi-v7a`,
 and `x86_64`) are published on this repo's
-[Releases page](<PASTE_YOUR_RELEASES_URL_HERE>). If you just want to build
+[Releases page](https://github.com/Blizzardfire/PumpkinLauncher/releases). If you just want to build
 the app itself, download those and skip straight to
 **Step 2: Copy the binaries into the Android project** below — no Rust
 toolchain, NDK, or `cargo-ndk` setup needed at all.
