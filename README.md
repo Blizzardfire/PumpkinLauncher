@@ -6,7 +6,8 @@ PumpkinLauncher is an Android control panel for a Pumpkin-MC server. The launche
 
 - **Launcher APK:** console UI, world/configuration management, plugin management, and engine version manager.
 - **Pumpkin engine module:** a native Android shared library loaded by the launcher at runtime.
-- **Engine distribution:** this repository's GitHub Releases. The launcher downloads engine modules independently; it never downloads engine code from the upstream Pumpkin repository directly.
+- **Launcher distribution:** signed APKs are published to this repository's GitHub Releases when a new `v*` version tag is pushed.
+- **Engine distribution:** ABI-specific shared libraries are published to the Foenui Package Manager. GitHub Releases contain only the engine manifest, not the native engine binaries.
 
 The engine module is built for:
 
@@ -14,52 +15,65 @@ The engine module is built for:
 - `armeabi-v7a`
 - `x86_64`
 
-## Engine channels
+## Engine download flow
 
-- **Release:** stable upstream Pumpkin release source.
-- **Nightly:** latest upstream `master` source, published as a prerelease.
-- **Installed:** locally installed versions, with the ability to activate another version.
+1. The launcher lists stable, version-tagged releases from this repository.
+2. Each release contains `manifest.json`, which records the engine version, upstream Pumpkin commit, per-ABI SHA-256, and Foenui PM download URL.
+3. The launcher downloads only the shared library matching the device ABI from `files.oryn.my.id`.
+4. The launcher verifies SHA-256 before installing or activating the engine module.
 
-Each engine release contains ABI-specific shared libraries and a `manifest.json` with SHA-256 checksums. The launcher verifies the checksum before installing a module and marks the library read-only before loading it.
+The engine is not bundled in the APK. Updating Pumpkin engine binaries therefore does not require changing the launcher APK, although this release workflow publishes both from the same version tag.
 
 ## Independent CI/CD
 
-The application and engine pipelines are intentionally separate. A change to the launcher UI does not rebuild the Rust engine, and a change to the engine bridge does not rebuild the APK.
+### `app-ci.yml` — Android application validation
 
-### `app-ci.yml` — Android application
-
-- Runs on pull requests and pushes to `master` when app/build files change, or manually.
+- Runs on pull requests and pushes to `master` when app/build files change.
 - Runs JVM unit tests and builds the debug APK.
 - Verifies that the APK does not contain `libpumpkin_engine.so`.
-- Uploads the APK as a standalone workflow artifact.
-- Does not wait for or download engine build artifacts.
+- Uploads the debug APK as a temporary workflow artifact only; it does not create a GitHub Release.
 
-### `engine-ci.yml` — Native engine modules
+### `engine-ci.yml` — Native engine validation
 
 - Runs on pull requests and pushes to `master` when `engine-bridge/**` changes.
-- Builds the three Android ABIs in a parallel matrix.
-- Checks the ELF machine type and uploads each ABI library as a separate artifact.
-- Daily schedule builds and publishes a Nightly engine release.
-- Manual dispatch can publish either Release or Nightly, with an optional upstream Pumpkin ref.
-- Generates `manifest.json` containing asset names and SHA-256 checksums.
+- Resolves the latest stable upstream Pumpkin release.
+- Builds the three Android ABIs in a parallel matrix and checks each ELF machine type.
+- Uploads temporary CI artifacts only; it does not publish to GitHub Releases or Foenui PM.
 
-### Release and installation flow
+### `release.yml` — tag-only publication
 
-1. Download and install the launcher APK from the App CI artifact.
-2. Open **Engine Manager**.
-3. Choose **Releases** or **Nightly**.
-4. The launcher fetches the independent engine release metadata and downloads only the library matching the device ABI.
-5. The launcher verifies SHA-256 before activating the engine module.
+- Runs only when a new tag matching `v*` is pushed.
+- Builds and signs the release APK.
+- Builds Pumpkin engine libraries for `arm64-v8a`, `armeabi-v7a`, and `x86_64`.
+- Publishes the three engine libraries to `user/fahry-a/pumpkin-engine` in Foenui PM.
+- Publishes the signed APK, `manifest.json`, and SHA-256 checksums to the GitHub Release for that tag.
+- Does not run on ordinary branch pushes, pull requests, schedules, or manual dispatch.
 
-No engine binary is embedded in the APK, so engine updates do not require a new launcher APK.
+### Required GitHub Actions secrets
+
+Configure these secrets in the PumpkinLauncher repository before pushing a release tag:
+
+- `FOENUI_UPLOAD_TOKEN`: personal Foenui PM token with `package:write` access to `user/fahry-a/pumpkin-engine`.
+- `ANDROID_KEYSTORE_BASE64`: base64-encoded persistent Android signing keystore.
+- `ANDROID_KEYSTORE_PASSWORD`: keystore password.
+- `ANDROID_KEY_ALIAS`: signing key alias.
+- `ANDROID_KEY_PASSWORD`: signing key password.
+
+Keep the same Android keystore for every release so users can install updates over an existing version. Do not commit the keystore or passwords to the repository.
 
 ## Build the launcher APK locally
+
+For a debug build:
 
 ```bash
 ./gradlew testDebugUnitTest assembleDebug
 ```
 
-The APK does not contain Pumpkin-MC. Install the APK, open **Engine Manager**, choose Release or Nightly, and install an engine module before starting a server.
+For a local unsigned release variant:
+
+```bash
+./gradlew assembleRelease
+```
 
 ## Android runtime note
 
