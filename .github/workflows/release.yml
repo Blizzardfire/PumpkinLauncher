@@ -54,6 +54,21 @@ jobs:
           echo "Launcher version: ${version}"
           echo "Pumpkin source: ${source_ref} (${source_sha})"
 
+      - name: Validate release publishing secrets
+        env:
+          FOENUI_UPLOAD_TOKEN: ${{ secrets.FOENUI_UPLOAD_TOKEN }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${FOENUI_UPLOAD_TOKEN:?Set FOENUI_UPLOAD_TOKEN with package:write permission}"
+          : "${ANDROID_KEYSTORE_BASE64:?Set ANDROID_KEYSTORE_BASE64}"
+          : "${ANDROID_KEYSTORE_PASSWORD:?Set ANDROID_KEYSTORE_PASSWORD}"
+          : "${ANDROID_KEY_ALIAS:?Set ANDROID_KEY_ALIAS}"
+          : "${ANDROID_KEY_PASSWORD:?Set ANDROID_KEY_PASSWORD}"
+
   build-apk:
     name: Build and sign launcher APK
     needs: resolve
