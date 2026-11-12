@@ -13,7 +13,7 @@ use pumpkin_core::{
 use pumpkin_wasm_host::WasmPluginLoader;
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, Once, OnceLock,
@@ -28,6 +28,26 @@ static LOGGER_INIT: Once = Once::new();
 static RAYON_INIT: Once = Once::new();
 static ACTIVE_SERVER: OnceLock<Mutex<Option<Arc<Server>>>> = OnceLock::new();
 static RUNTIME_HANDLE: OnceLock<Mutex<Option<Handle>>> = OnceLock::new();
+
+struct WorkingDirectoryGuard {
+    previous: PathBuf,
+}
+
+impl WorkingDirectoryGuard {
+    fn enter(path: &str) -> Result<Self, String> {
+        let previous = std::env::current_dir().map_err(|error| error.to_string())?;
+        std::env::set_current_dir(path).map_err(|error| error.to_string())?;
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for WorkingDirectoryGuard {
+    fn drop(&mut self) {
+        if let Err(error) = std::env::set_current_dir(&self.previous) {
+            tracing::error!("Could not restore the Android process working directory: {error}");
+        }
+    }
+}
 
 struct RunningGuard;
 
@@ -62,7 +82,11 @@ fn run_engine(work_dir: String, log_file: String) -> Result<(), String> {
     if let Some(parent) = Path::new(&log_file).parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    std::env::set_current_dir(&work_dir).map_err(|error| error.to_string())?;
+    // Pumpkin currently resolves some runtime paths relative to cwd. Keep this
+    // change scoped to the engine lifetime and restore the app cwd on every exit.
+    // Note: cwd is process-global, so the host must avoid relative-path work while
+    // the embedded server is running.
+    let _working_directory = WorkingDirectoryGuard::enter(&work_dir)?;
 
     let mut config = PumpkinConfig::load(Path::new(&work_dir));
     config.advanced.logging.file = log_file;
