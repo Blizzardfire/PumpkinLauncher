@@ -144,7 +144,7 @@ class EngineManagerActivity : AppCompatActivity() {
             }
             addView(progressRow)
             cancelButton = actionButton("Cancel download", filled = false) {
-                downloadCancellation?.set(true)
+                downloadCancellation?.let { EngineModuleManager.cancelDownload(it) }
                 cancelButton.isEnabled = false
                 cancelButton.text = "Cancelling…"
             }
