@@ -56,6 +56,8 @@ object EngineModuleManager {
     private const val ACTIVE_VERSION = "active_version"
     private const val MODULE_ROOT = "engine/modules/pumpkin"
     private const val MAX_DOWNLOAD_CONNECTIONS = 25
+    private const val MIN_BYTES_PER_CONNECTION = 2L * 1024L * 1024L
+    private const val SMALL_DOWNLOAD_SINGLE_CONNECTION = 4L * 1024L * 1024L
     private const val DOWNLOAD_BUFFER_SIZE = 64 * 1024
     private val supportedAbis = setOf("arm64-v8a", "armeabi-v7a", "x86_64")
 
@@ -107,6 +109,7 @@ object EngineModuleManager {
         return result
     }
 
+    @Synchronized
     fun install(
         context: Context,
         release: EngineRelease,
@@ -130,8 +133,17 @@ object EngineModuleManager {
         val asset = manifest.getJSONObject("assets").getJSONObject(abi)
         val assetName = asset.getString("name")
         val expectedSha256 = asset.getString("sha256").lowercase()
+        if (expectedSha256.length != 64 || expectedSha256.any { it !in "0123456789abcdef" }) {
+            throw SecurityException("The engine manifest contains an invalid SHA-256 checksum.")
+        }
+        if (assetName.isBlank() || assetName.contains('/') || assetName.contains('\\')) {
+            throw SecurityException("The engine manifest contains an invalid asset name.")
+        }
         val downloadUrl = release.assetUrls[assetName]
             ?: throw IllegalStateException("The release is missing $assetName.")
+        if (URL(downloadUrl).protocol != "https") {
+            throw SecurityException("Engine downloads must use HTTPS.")
+        }
 
         val safeTag = release.tagName.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val versionDir = File(context.filesDir, "$MODULE_ROOT/versions/$safeTag")
@@ -163,18 +175,32 @@ object EngineModuleManager {
                 throw SecurityException("Engine checksum verification failed.")
             }
 
-            if (destination.exists() && !destination.delete()) {
-                throw IllegalStateException("Could not replace the previous engine file.")
+            // Preserve the previous known-good library until the replacement is verified and installed.
+            val backup = File(versionDir, "libpumpkin_engine.so.previous")
+            if (backup.exists() && !backup.delete()) {
+                throw IllegalStateException("Could not clear the previous engine backup.")
             }
-            if (!temporary.renameTo(destination)) {
-                throw IllegalStateException("Could not install the downloaded engine library.")
+            val hadPrevious = destination.exists()
+            if (hadPrevious && !destination.renameTo(backup)) {
+                throw IllegalStateException("Could not preserve the previous engine library.")
             }
-            if (!destination.setReadable(true, true) || !destination.setReadOnly()) {
+            try {
+                if (!temporary.renameTo(destination)) {
+                    throw IllegalStateException("Could not install the downloaded engine library.")
+                }
+                if (!destination.setReadable(true, true) || !destination.setReadOnly()) {
+                    throw IllegalStateException("Could not make the engine library read-only.")
+                }
+                writeMetadata(versionDir, manifest, abi, release.tagName)
+                if (backup.exists()) backup.delete()
+            } catch (installError: Exception) {
+                destination.setWritable(true, true)
                 destination.delete()
-                throw IllegalStateException("Could not make the engine library read-only.")
+                if (hadPrevious && backup.exists() && !backup.renameTo(destination)) {
+                    throw IllegalStateException("Installation failed and the previous engine could not be restored.", installError)
+                }
+                throw installError
             }
-
-            writeMetadata(versionDir, manifest, abi, release.tagName)
             return InstalledEngine(
                 manifest.optString("version", release.tagName),
                 manifest.optString("channel", if (release.prerelease) "nightly" else "release"),
@@ -194,12 +220,16 @@ object EngineModuleManager {
         onProgress: (EngineDownloadProgress) -> Unit
     ) {
         val totalBytes = probeRangeSupport(url)
-        if (totalBytes == null || totalBytes < MAX_DOWNLOAD_CONNECTIONS.toLong()) {
+        if (totalBytes == null || totalBytes < SMALL_DOWNLOAD_SINGLE_CONNECTION) {
             downloadSingle(url, destination, cancelled, onProgress)
             return
         }
 
-        val connectionCount = minOf(MAX_DOWNLOAD_CONNECTIONS.toLong(), totalBytes).toInt().coerceAtLeast(1)
+        // 25 is a ceiling; avoid creating many tiny chunks on small assets.
+        val connectionCount = minOf(
+            MAX_DOWNLOAD_CONNECTIONS.toLong(),
+            (totalBytes / MIN_BYTES_PER_CONNECTION).coerceAtLeast(1L)
+        ).toInt().coerceAtLeast(1)
         val chunkSize = (totalBytes + connectionCount - 1L) / connectionCount
         val downloaded = AtomicLong(0L)
         val active = AtomicInteger(0)
@@ -243,8 +273,17 @@ object EngineModuleManager {
                                     throw IllegalStateException("Server stopped supporting HTTP Range during download.")
                                 }
                                 val contentRange = connection.getHeaderField("Content-Range") ?: ""
-                                if (!contentRange.startsWith("bytes $start-$end/")) {
-                                    throw IllegalStateException("Invalid Content-Range response for download chunk.")
+                                val rangeParts = contentRange.removePrefix("bytes ").split('-', '/')
+                                if (rangeParts.size != 3 ||
+                                    rangeParts[0].toLongOrNull() != start ||
+                                    rangeParts[1].toLongOrNull() != end ||
+                                    rangeParts[2].toLongOrNull() != totalBytes
+                                ) {
+                                    throw IllegalStateException("Server returned a mismatched HTTP Range response.")
+                                }
+                                val responseLength = connection.getHeaderField("Content-Length")?.toLongOrNull()
+                                if (responseLength != null && responseLength != end - start + 1L) {
+                                    throw IllegalStateException("HTTP Range response has an invalid Content-Length.")
                                 }
 
                                 RandomAccessFile(destination, "rw").use { output ->
@@ -345,8 +384,13 @@ object EngineModuleManager {
         return try {
             if (connection.responseCode != HttpURLConnection.HTTP_PARTIAL) return null
             val contentRange = connection.getHeaderField("Content-Range") ?: return null
-            val total = contentRange.substringAfterLast('/', "").toLongOrNull() ?: return null
-            if (total <= 0L) null else total
+            val rangeParts = contentRange.removePrefix("bytes ").split('-', '/')
+            if (rangeParts.size != 3 || rangeParts[0].toLongOrNull() != 0L || rangeParts[1].toLongOrNull() != 0L) {
+                return null
+            }
+            val total = rangeParts[2].toLongOrNull() ?: return null
+            val probeLength = connection.getHeaderField("Content-Length")?.toLongOrNull()
+            if (total <= 0L || (probeLength != null && probeLength != 1L)) null else total
         } finally {
             connection.disconnect()
         }
