@@ -275,8 +275,14 @@ object EngineModuleManager {
                         try {
                             val connection = openRangeConnection(url, start, end, cancelled)
                             try {
-                                if (connection.responseCode != HttpURLConnection.HTTP_PARTIAL) {
+                                val responseCode = connection.responseCode
+                                if (responseCode == HttpURLConnection.HTTP_OK ||
+                                    responseCode == HttpURLConnection.HTTP_REQUESTED_RANGE_NOT_SATISFIABLE
+                                ) {
                                     throw RangeNotSupportedException("Server stopped supporting HTTP Range during download.")
+                                }
+                                if (responseCode != HttpURLConnection.HTTP_PARTIAL) {
+                                    throw IllegalStateException("HTTP Range request failed with status $responseCode.")
                                 }
                                 val contentRange = connection.getHeaderField("Content-Range") ?: ""
                                 val rangeParts = contentRange.removePrefix("bytes ").split('-', '/')
