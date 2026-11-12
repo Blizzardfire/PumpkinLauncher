@@ -277,7 +277,7 @@ object EngineModuleManager {
                             try {
                                 val responseCode = connection.responseCode
                                 if (responseCode == HttpURLConnection.HTTP_OK ||
-                                    responseCode == HttpURLConnection.HTTP_REQUESTED_RANGE_NOT_SATISFIABLE
+                                    responseCode == 416
                                 ) {
                                     throw RangeNotSupportedException("Server stopped supporting HTTP Range during download.")
                                 }
