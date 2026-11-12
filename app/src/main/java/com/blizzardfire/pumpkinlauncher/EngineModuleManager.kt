@@ -49,6 +49,7 @@ data class EngineDownloadProgress(
 }
 
 class EngineDownloadCancelledException : Exception("Download cancelled.")
+private class RangeNotSupportedException(message: String) : Exception(message)
 
 object EngineModuleManager {
     private const val OWNER = "Fahry-a"
@@ -275,7 +276,7 @@ object EngineModuleManager {
                             val connection = openRangeConnection(url, start, end, cancelled)
                             try {
                                 if (connection.responseCode != HttpURLConnection.HTTP_PARTIAL) {
-                                    throw IllegalStateException("Server stopped supporting HTTP Range during download.")
+                                    throw RangeNotSupportedException("Server stopped supporting HTTP Range during download.")
                                 }
                                 val contentRange = connection.getHeaderField("Content-Range") ?: ""
                                 val rangeParts = contentRange.removePrefix("bytes ").split('-', '/')
@@ -284,7 +285,7 @@ object EngineModuleManager {
                                     rangeParts[1].toLongOrNull() != end ||
                                     rangeParts[2].toLongOrNull() != totalBytes
                                 ) {
-                                    throw IllegalStateException("Server returned a mismatched HTTP Range response.")
+                                    throw RangeNotSupportedException("Server returned a mismatched HTTP Range response.")
                                 }
                                 val responseLength = connection.getHeaderField("Content-Length")?.toLongOrNull()
                                 if (responseLength != null && responseLength != end - start + 1L) {
@@ -323,6 +324,7 @@ object EngineModuleManager {
                         } catch (error: Exception) {
                             if (chunkBytes > 0L) downloaded.addAndGet(-chunkBytes)
                             if (cancelled.get() || error is InterruptedException) throw EngineDownloadCancelledException()
+                            if (error is RangeNotSupportedException) throw error
                             attempt++
                             if (attempt >= 3) throw error
                             Thread.sleep(350L * attempt)
@@ -339,8 +341,15 @@ object EngineModuleManager {
             onProgress(EngineDownloadProgress(totalBytes, totalBytes, 0, 0L))
         } catch (error: Exception) {
             futures.forEach { it.cancel(true) }
+            disconnectConnections(cancelled)
+            executor.shutdownNow()
             if (cancelled.get() || error is InterruptedException) throw EngineDownloadCancelledException()
             val cause = error.cause
+            if (cause is RangeNotSupportedException) {
+                // The server may have changed behavior after the probe; restart cleanly in single-stream mode.
+                downloadSingle(url, destination, cancelled, onProgress)
+                return
+            }
             if (cause is Exception) throw cause
             throw error
         } finally {
@@ -431,6 +440,10 @@ object EngineModuleManager {
 
     fun cancelDownload(cancelled: AtomicBoolean) {
         cancelled.set(true)
+        disconnectConnections(cancelled)
+    }
+
+    private fun disconnectConnections(cancelled: AtomicBoolean) {
         activeConnections.remove(cancelled)?.forEach { it.disconnect() }
     }
 
