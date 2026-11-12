@@ -71,7 +71,7 @@ object EngineModuleManager {
     }
 
     fun fetchReleases(channel: String): List<EngineRelease> {
-        require(channel == "release" || channel == "nightly")
+        require(channel == "release")
         val connection = openConnection(
             "https://api.github.com/repos/$OWNER/$REPOSITORY/releases?per_page=50"
         )
@@ -83,11 +83,13 @@ object EngineModuleManager {
 
         val releases = org.json.JSONArray(body)
         val result = mutableListOf<EngineRelease>()
+        val versionTag = Regex("^v\\d+(?:\\.\\d+){1,2}(?:[-+][0-9A-Za-z.-]+)?$")
         for (index in 0 until releases.length()) {
             val release = releases.getJSONObject(index)
             val tag = release.optString("tag_name")
-            val prerelease = release.optBoolean("prerelease")
-            if (!tag.startsWith("pumpkin-") || prerelease != (channel == "nightly")) continue
+            if (!tag.matches(versionTag) || release.optBoolean("draft") || release.optBoolean("prerelease")) {
+                continue
+            }
 
             val assets = release.optJSONArray("assets") ?: continue
             val urls = mutableMapOf<String, String>()
@@ -104,14 +106,13 @@ object EngineModuleManager {
                 tagName = tag,
                 name = release.optString("name", tag),
                 publishedAt = release.optString("published_at"),
-                prerelease = prerelease,
+                prerelease = false,
                 manifestUrl = manifestUrl,
                 assetUrls = urls
             )
         }
         return result
     }
-
     @Synchronized
     fun install(
         context: Context,
@@ -143,8 +144,10 @@ object EngineModuleManager {
         if (assetName.isBlank() || assetName.contains('/') || assetName.contains('\\')) {
             throw SecurityException("The engine manifest contains an invalid asset name.")
         }
-        val downloadUrl = release.assetUrls[assetName]
-            ?: throw IllegalStateException("The release is missing $assetName.")
+        val downloadUrl = asset.optString("url").ifBlank {
+            release.assetUrls[assetName]
+                ?: throw IllegalStateException("The engine manifest is missing the download URL for $assetName.")
+        }
         if (URL(downloadUrl).protocol != "https") {
             throw SecurityException("Engine downloads must use HTTPS.")
         }
