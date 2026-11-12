@@ -125,6 +125,7 @@ object EngineModuleManager {
             manifestConnection.inputStream.bufferedReader().use { it.readText() }
         } finally {
             manifestConnection.disconnect()
+            unregisterConnection(cancelled, manifestConnection)
         }
         val manifest = JSONObject(manifestText)
 
