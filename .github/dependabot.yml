@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Action pins in .github/workflows (including SHA-pinned actions).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # AGP, AndroidX, and the version catalog in gradle/libs.versions.toml.
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      gradle:
+        patterns: ["*"]
+
+  # Native bridge crates; path dependencies on ../Pumpkin are skipped automatically.
+  - package-ecosystem: "cargo"
+    directory: "/engine-bridge"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo:
+        patterns: ["*"]
