@@ -7,6 +7,7 @@ import org.junit.Test
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class EngineModuleManagerTest {
     @Test
@@ -46,6 +47,24 @@ class EngineModuleManagerTest {
     }
 
     @Test
+    fun retriesTransientRangeRequestFailure() {
+        val payload = ByteArray(8 * 1024 * 1024) { (it % 223).toByte() }
+        val server = startServer(payload, supportsRanges = true, failFirstRange = true)
+        val target = Files.createTempFile("pumpkin-engine-retry", ".so").toFile()
+        try {
+            EngineModuleManager.downloadAsset(
+                "http://127.0.0.1:${server.address.port}/engine",
+                target,
+                AtomicBoolean(false)
+            )
+            assertArrayEquals(payload, target.readBytes())
+        } finally {
+            server.stop(0)
+            target.delete()
+        }
+    }
+
+    @Test
     fun cancelledDownloadStopsBeforeOpeningConnections() {
         val target = Files.createTempFile("pumpkin-engine-cancel", ".so").toFile()
         try {
@@ -61,11 +80,17 @@ class EngineModuleManagerTest {
         }
     }
 
-    private fun startServer(payload: ByteArray, supportsRanges: Boolean): HttpServer {
+    private fun startServer(payload: ByteArray, supportsRanges: Boolean, failFirstRange: Boolean = false): HttpServer {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val rangeRequests = AtomicInteger(0)
         server.createContext("/engine") { exchange ->
             val range = exchange.requestHeaders.getFirst("Range")
             if (supportsRanges && range != null && range.startsWith("bytes=")) {
+                if (failFirstRange && rangeRequests.incrementAndGet() == 2) {
+                    exchange.sendResponseHeaders(503, -1)
+                    exchange.close()
+                    return@createContext
+                }
                 val bounds = range.removePrefix("bytes=").split("-")
                 val start = bounds[0].toInt()
                 val end = bounds[1].toInt().coerceAtMost(payload.lastIndex)
