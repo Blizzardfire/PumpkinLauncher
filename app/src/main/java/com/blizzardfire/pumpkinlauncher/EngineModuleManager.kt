@@ -213,12 +213,13 @@ object EngineModuleManager {
         }
     }
 
-    private fun downloadAsset(
+    internal fun downloadAsset(
         url: String,
         destination: File,
         cancelled: AtomicBoolean,
         onProgress: (EngineDownloadProgress) -> Unit
     ) {
+        checkNotCancelled(cancelled)
         val totalBytes = probeRangeSupport(url)
         if (totalBytes == null || totalBytes < SMALL_DOWNLOAD_SINGLE_CONNECTION) {
             downloadSingle(url, destination, cancelled, onProgress)
@@ -230,6 +231,7 @@ object EngineModuleManager {
             MAX_DOWNLOAD_CONNECTIONS.toLong(),
             (totalBytes / MIN_BYTES_PER_CONNECTION).coerceAtLeast(1L)
         ).toInt().coerceAtLeast(1)
+        require(connectionCount in 1..MAX_DOWNLOAD_CONNECTIONS) { "Invalid downloader connection count." }
         val chunkSize = (totalBytes + connectionCount - 1L) / connectionCount
         val downloaded = AtomicLong(0L)
         val active = AtomicInteger(0)
