@@ -269,11 +269,12 @@ class EngineManagerActivity : AppCompatActivity() {
                 addView(label("${engine.channel.uppercase()}  •  ${engine.abi}", 10f, accent, true)
                     .apply { setPadding(0, dp(4), 0, dp(6)) })
                 addView(label(engine.library.name + "  •  " + formatBytes(engine.library.length()), 10f, secondaryText))
-                addView(actionButton(if (active) "Currently active" else "Activate engine", !active) {
+                val activateButton = actionButton(if (active) "Currently active" else "Activate engine", !active) {
                     activate(tag)
-                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)).apply {
-                    topMargin = dp(10)
-                }).also { if (active) it.isEnabled = false }
+                }.apply { isEnabled = !active }
+                addView(activateButton, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(42)
+                ).apply { topMargin = dp(10) })
             }
             content.addView(item, marginParams(bottom = 9))
         }
@@ -295,6 +296,12 @@ class EngineManagerActivity : AppCompatActivity() {
         progressStats.text = "Starting"
         cancelButton.isEnabled = true
         cancelButton.text = "Cancel download"
+        cancelButton.setOnClickListener {
+            downloadCancellation?.set(true)
+            cancelButton.isEnabled = false
+            cancelButton.text = "Cancelling…"
+        }
+        progressBar.progress = 0
         status.text = "Downloading engine module…"
 
         executor.execute {
