@@ -7,9 +7,16 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 data class EngineRelease(
     val tagName: String,
@@ -30,12 +37,26 @@ data class InstalledEngine(
         get() = File(directory, "libpumpkin_engine.so")
 }
 
+data class EngineDownloadProgress(
+    val downloadedBytes: Long,
+    val totalBytes: Long,
+    val activeConnections: Int,
+    val bytesPerSecond: Long
+) {
+    val percent: Int
+        get() = if (totalBytes > 0L) ((downloadedBytes * 100L) / totalBytes).toInt().coerceIn(0, 100) else 0
+}
+
+class EngineDownloadCancelledException : Exception("Download cancelled.")
+
 object EngineModuleManager {
     private const val OWNER = "Fahry-a"
     private const val REPOSITORY = "PumpkinLauncher"
     private const val PREFS = "pumpkin_engine_modules"
     private const val ACTIVE_VERSION = "active_version"
     private const val MODULE_ROOT = "engine/modules/pumpkin"
+    private const val MAX_DOWNLOAD_CONNECTIONS = 25
+    private const val DOWNLOAD_BUFFER_SIZE = 64 * 1024
     private val supportedAbis = setOf("arm64-v8a", "armeabi-v7a", "x86_64")
 
     fun deviceAbi(): String {
@@ -49,8 +70,11 @@ object EngineModuleManager {
         val connection = openConnection(
             "https://api.github.com/repos/$OWNER/$REPOSITORY/releases?per_page=50"
         )
-        val body = connection.inputStream.bufferedReader().use { it.readText() }
-        connection.disconnect()
+        val body = try {
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
 
         val releases = org.json.JSONArray(body)
         val result = mutableListOf<EngineRelease>()
@@ -68,9 +92,7 @@ object EngineModuleManager {
                 val assetName = asset.optString("name")
                 val downloadUrl = asset.optString("browser_download_url")
                 if (assetName == "manifest.json") manifestUrl = downloadUrl
-                if (assetName.isNotBlank() && downloadUrl.isNotBlank()) {
-                    urls[assetName] = downloadUrl
-                }
+                if (assetName.isNotBlank() && downloadUrl.isNotBlank()) urls[assetName] = downloadUrl
             }
             if (manifestUrl.isNullOrBlank()) continue
             result += EngineRelease(
@@ -85,16 +107,23 @@ object EngineModuleManager {
         return result
     }
 
-    fun install(context: Context, release: EngineRelease): InstalledEngine {
+    fun install(
+        context: Context,
+        release: EngineRelease,
+        cancelled: AtomicBoolean = AtomicBoolean(false),
+        onProgress: (EngineDownloadProgress) -> Unit = {}
+    ): InstalledEngine {
+        checkNotCancelled(cancelled)
         val abi = deviceAbi()
         val manifestConnection = openConnection(release.manifestUrl)
-        val manifestText = manifestConnection.inputStream.bufferedReader().use { it.readText() }
-        manifestConnection.disconnect()
+        val manifestText = try {
+            manifestConnection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            manifestConnection.disconnect()
+        }
         val manifest = JSONObject(manifestText)
 
-        if (manifest.optInt("schemaVersion") != 1 ||
-            manifest.optString("engine") != "Pumpkin-MC"
-        ) {
+        if (manifest.optInt("schemaVersion") != 1 || manifest.optString("engine") != "Pumpkin-MC") {
             throw IllegalStateException("Unsupported or invalid engine manifest.")
         }
 
@@ -105,8 +134,7 @@ object EngineModuleManager {
             ?: throw IllegalStateException("The release is missing $assetName.")
 
         val safeTag = release.tagName.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        val root = File(context.filesDir, MODULE_ROOT)
-        val versionDir = File(root, "versions/$safeTag")
+        val versionDir = File(context.filesDir, "$MODULE_ROOT/versions/$safeTag")
         if (!versionDir.exists() && !versionDir.mkdirs()) {
             throw IllegalStateException("Could not create the engine module directory.")
         }
@@ -126,41 +154,219 @@ object EngineModuleManager {
         }
 
         val temporary = File(versionDir, "engine.download")
-        temporary.delete()
-        val downloadConnection = openConnection(downloadUrl)
+        if (temporary.exists()) temporary.delete()
         try {
-            downloadConnection.inputStream.use { input ->
-                FileOutputStream(temporary).use { output -> input.copyTo(output) }
+            downloadAsset(downloadUrl, temporary, cancelled, onProgress)
+
+            checkNotCancelled(cancelled)
+            if (sha256(temporary) != expectedSha256) {
+                throw SecurityException("Engine checksum verification failed.")
+            }
+
+            if (destination.exists() && !destination.delete()) {
+                throw IllegalStateException("Could not replace the previous engine file.")
+            }
+            if (!temporary.renameTo(destination)) {
+                throw IllegalStateException("Could not install the downloaded engine library.")
+            }
+            if (!destination.setReadable(true, true) || !destination.setReadOnly()) {
+                destination.delete()
+                throw IllegalStateException("Could not make the engine library read-only.")
+            }
+
+            writeMetadata(versionDir, manifest, abi, release.tagName)
+            return InstalledEngine(
+                manifest.optString("version", release.tagName),
+                manifest.optString("channel", if (release.prerelease) "nightly" else "release"),
+                abi,
+                versionDir
+            )
+        } catch (error: Exception) {
+            temporary.delete()
+            throw error
+        }
+    }
+
+    private fun downloadAsset(
+        url: String,
+        destination: File,
+        cancelled: AtomicBoolean,
+        onProgress: (EngineDownloadProgress) -> Unit
+    ) {
+        val totalBytes = probeRangeSupport(url)
+        if (totalBytes == null || totalBytes < MAX_DOWNLOAD_CONNECTIONS.toLong()) {
+            downloadSingle(url, destination, cancelled, onProgress)
+            return
+        }
+
+        val connectionCount = minOf(MAX_DOWNLOAD_CONNECTIONS, totalBytes.toInt().coerceAtLeast(1))
+        val chunkSize = (totalBytes + connectionCount - 1L) / connectionCount
+        val downloaded = AtomicLong(0L)
+        val active = AtomicInteger(0)
+        val lastCallback = AtomicLong(0L)
+        val lastSpeedBytes = AtomicLong(0L)
+        val lastSpeedTime = AtomicLong(System.nanoTime())
+
+        fun report(force: Boolean = false) {
+            val now = System.nanoTime()
+            val previous = lastCallback.get()
+            if (!force && now - previous < 100_000_000L) return
+            if (!lastCallback.compareAndSet(previous, now) && !force) return
+
+            val bytes = downloaded.get().coerceAtMost(totalBytes)
+            val elapsed = (now - lastSpeedTime.get()).coerceAtLeast(1L)
+            val previousBytes = lastSpeedBytes.getAndSet(bytes)
+            val speed = ((bytes - previousBytes).coerceAtLeast(0L) * 1_000_000_000L) / elapsed
+            lastSpeedTime.set(now)
+            onProgress(EngineDownloadProgress(bytes, totalBytes, active.get(), speed))
+        }
+
+        RandomAccessFile(destination, "rw").use { it.setLength(totalBytes) }
+        val executor = Executors.newFixedThreadPool(connectionCount)
+        val futures = mutableListOf<Future<Unit>>()
+        try {
+            for (index in 0 until connectionCount) {
+                val start = index * chunkSize
+                val end = minOf(totalBytes - 1L, start + chunkSize - 1L)
+                if (start > end) continue
+
+                futures += executor.submit(Callable {
+                    var attempt = 0
+                    while (true) {
+                        checkNotCancelled(cancelled)
+                        var chunkBytes = 0L
+                        active.incrementAndGet()
+                        try {
+                            val connection = openRangeConnection(url, start, end)
+                            try {
+                                if (connection.responseCode != HttpURLConnection.HTTP_PARTIAL) {
+                                    throw IllegalStateException("Server stopped supporting HTTP Range during download.")
+                                }
+                                val contentRange = connection.getHeaderField("Content-Range") ?: ""
+                                if (!contentRange.startsWith("bytes $start-$end/")) {
+                                    throw IllegalStateException("Invalid Content-Range response for download chunk.")
+                                }
+
+                                RandomAccessFile(destination, "rw").use { output ->
+                                    output.seek(start)
+                                    connection.inputStream.use { input ->
+                                        val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+                                        val expectedChunkBytes = end - start + 1L
+                                        while (chunkBytes < expectedChunkBytes) {
+                                            checkNotCancelled(cancelled)
+                                            val count = input.read(
+                                                buffer,
+                                                0,
+                                                minOf(buffer.size.toLong(), expectedChunkBytes - chunkBytes).toInt()
+                                            )
+                                            if (count < 0) break
+                                            output.write(buffer, 0, count)
+                                            chunkBytes += count
+                                            downloaded.addAndGet(count.toLong())
+                                            report()
+                                        }
+                                        if (chunkBytes != expectedChunkBytes) {
+                                            throw IllegalStateException("Incomplete download chunk ($chunkBytes/$expectedChunkBytes bytes).")
+                                        }
+                                    }
+                                }
+                            } finally {
+                                connection.disconnect()
+                            }
+                            report(force = true)
+                            break
+                        } catch (error: Exception) {
+                            if (chunkBytes > 0L) downloaded.addAndGet(-chunkBytes)
+                            if (cancelled.get() || error is InterruptedException) throw EngineDownloadCancelledException()
+                            attempt++
+                            if (attempt >= 3) throw error
+                            Thread.sleep(350L * attempt)
+                        } finally {
+                            active.decrementAndGet()
+                            report(force = true)
+                        }
+                    }
+                    Unit
+                })
+            }
+            futures.forEach { it.get() }
+            checkNotCancelled(cancelled)
+            onProgress(EngineDownloadProgress(totalBytes, totalBytes, 0, 0L))
+        } catch (error: Exception) {
+            futures.forEach { it.cancel(true) }
+            if (cancelled.get() || error is InterruptedException) throw EngineDownloadCancelledException()
+            val cause = error.cause
+            if (cause is Exception) throw cause
+            throw error
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    private fun downloadSingle(
+        url: String,
+        destination: File,
+        cancelled: AtomicBoolean,
+        onProgress: (EngineDownloadProgress) -> Unit
+    ) {
+        val connection = openConnection(url)
+        val total = connection.contentLengthLong
+        val started = System.nanoTime()
+        var downloaded = 0L
+        try {
+            connection.inputStream.use { input ->
+                FileOutputStream(destination, false).use { output ->
+                    val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+                    while (true) {
+                        checkNotCancelled(cancelled)
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        downloaded += count
+                        val elapsed = (System.nanoTime() - started).coerceAtLeast(1L)
+                        val speed = downloaded * 1_000_000_000L / elapsed
+                        onProgress(EngineDownloadProgress(downloaded, total, 1, speed))
+                    }
+                }
             }
         } finally {
-            downloadConnection.disconnect()
+            connection.disconnect()
         }
+        checkNotCancelled(cancelled)
+        onProgress(EngineDownloadProgress(downloaded, total, 0, 0L))
+    }
 
-        if (sha256(temporary) != expectedSha256) {
-            temporary.delete()
-            throw SecurityException("Engine checksum verification failed.")
+    private fun probeRangeSupport(url: String): Long? {
+        val connection = try {
+            openRangeConnection(url, 0L, 0L)
+        } catch (_: Exception) {
+            return null
         }
+        return try {
+            if (connection.responseCode != HttpURLConnection.HTTP_PARTIAL) return null
+            val contentRange = connection.getHeaderField("Content-Range") ?: return null
+            val total = contentRange.substringAfterLast('/', "").toLongOrNull() ?: return null
+            if (total <= 0L) null else total
+        } finally {
+            connection.disconnect()
+        }
+    }
 
-        if (destination.exists() && !destination.delete()) {
-            temporary.delete()
-            throw IllegalStateException("Could not replace the previous engine file.")
-        }
-        if (!temporary.renameTo(destination)) {
-            temporary.delete()
-            throw IllegalStateException("Could not install the downloaded engine library.")
-        }
-        if (!destination.setReadable(true, true) || !destination.setReadOnly()) {
-            destination.delete()
-            throw IllegalStateException("Could not make the engine library read-only.")
-        }
+    private fun openRangeConnection(url: String, start: Long, end: Long): HttpURLConnection {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.connectTimeout = 20_000
+        connection.readTimeout = 90_000
+        connection.instanceFollowRedirects = true
+        connection.setRequestProperty("User-Agent", "PumpkinLauncher-Android")
+        connection.setRequestProperty("Range", "bytes=$start-$end")
+        connection.connect()
+        return connection
+    }
 
-        writeMetadata(versionDir, manifest, abi, release.tagName)
-        return InstalledEngine(
-            manifest.optString("version", release.tagName),
-            manifest.optString("channel", if (release.prerelease) "nightly" else "release"),
-            abi,
-            versionDir
-        )
+    private fun checkNotCancelled(cancelled: AtomicBoolean) {
+        if (cancelled.get() || Thread.currentThread().isInterrupted) {
+            throw EngineDownloadCancelledException()
+        }
     }
 
     fun activate(context: Context, versionTag: String) {
@@ -209,12 +415,7 @@ object EngineModuleManager {
             ?: emptyList()
     }
 
-    private fun writeMetadata(
-        directory: File,
-        manifest: JSONObject,
-        abi: String,
-        tag: String
-    ) {
+    private fun writeMetadata(directory: File, manifest: JSONObject, abi: String, tag: String) {
         val metadata = JSONObject()
             .put("tag", tag)
             .put("version", manifest.optString("version", tag))
@@ -227,7 +428,7 @@ object EngineModuleManager {
     private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         FileInputStream(file).use { input ->
-            val buffer = ByteArray(64 * 1024)
+            val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
             while (true) {
                 val count = input.read(buffer)
                 if (count < 0) break
@@ -241,6 +442,7 @@ object EngineModuleManager {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 15_000
         connection.readTimeout = 60_000
+        connection.instanceFollowRedirects = true
         connection.setRequestProperty("User-Agent", "PumpkinLauncher-Android")
         connection.setRequestProperty("Accept", "application/vnd.github+json")
         connection.connect()
