@@ -34,7 +34,7 @@ class EngineManagerActivity : AppCompatActivity() {
 
     private var selectedChannel = "release"
 
-    private val background = Color.rgb(13, 15, 19)
+    private val screenBackground = Color.rgb(13, 15, 19)
     private val surface = Color.rgb(25, 29, 36)
     private val surfaceRaised = Color.rgb(34, 39, 48)
     private val primaryText = Color.rgb(244, 245, 247)
@@ -53,7 +53,7 @@ class EngineManagerActivity : AppCompatActivity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(12), dp(18), dp(12))
-            setBackgroundColor(background)
+            setBackgroundColor(screenBackground)
         }
 
         val header = LinearLayout(this).apply {
