@@ -1,0 +1,139 @@
+name: Pumpkin Engine CI
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "engine-bridge/**"
+      - ".github/workflows/engine-ci.yml"
+  push:
+    branches: [master]
+    paths:
+      - "engine-bridge/**"
+      - ".github/workflows/engine-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pumpkin-engine-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve-source:
+    name: Resolve stable Pumpkin source
+    runs-on: ubuntu-24.04
+    outputs:
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+    steps:
+      - name: Resolve latest stable upstream release
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_ref="$(gh api repos/Pumpkin-MC/Pumpkin/releases/latest --jq .tag_name)"
+          if [[ -z "${source_ref}" || "${source_ref}" == "null" ]]; then
+            source_ref="master"
+          fi
+          source_sha="$(gh api "repos/Pumpkin-MC/Pumpkin/commits/${source_ref}" --jq .sha)"
+          if [[ -z "${source_sha}" || "${source_sha}" == "null" ]]; then
+            echo "::error::Could not resolve Pumpkin ref '${source_ref}'"
+            exit 1
+          fi
+          {
+            echo "source_ref=${source_ref}"
+            echo "source_sha=${source_sha}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Validating upstream ${source_ref} (${source_sha})"
+
+  build-engine:
+    name: Build engine — ${{ matrix.android_abi }}
+    needs: resolve-source
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - android_abi: arm64-v8a
+            rust_target: aarch64-linux-android
+            expected_machine: AArch64
+          - android_abi: armeabi-v7a
+            rust_target: armv7-linux-androideabi
+            expected_machine: ARM
+          - android_abi: x86_64
+            rust_target: x86_64-linux-android
+            expected_machine: X86-64
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Checkout launcher
+        uses: actions/checkout@v4
+
+      - name: Checkout Pumpkin source
+        uses: actions/checkout@v4
+        with:
+          repository: Pumpkin-MC/Pumpkin
+          ref: ${{ needs.resolve-source.outputs.source_ref }}
+          path: Pumpkin
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Rust toolchain and target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install pinned Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/28.2.13676358" >> "${GITHUB_ENV}"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/28.2.13676358" >> "${GITHUB_ENV}"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-bridge -> target
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build Pumpkin Android shared library
+        working-directory: engine-bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf ../dist
+          mkdir -p ../dist
+          cargo ndk \
+            -t "${{ matrix.android_abi }}" \
+            --platform 26 \
+            -o ../dist \
+            build --release
+          library="../dist/${{ matrix.android_abi }}/libpumpkin_engine.so"
+          test -s "${library}"
+          cp "${library}" "../dist/libpumpkin_engine-${{ matrix.android_abi }}.so"
+          actual="$(readelf -h "../dist/libpumpkin_engine-${{ matrix.android_abi }}.so" | awk -F: '/Machine:/ {gsub(/^[ \t]+/, "", $2); print $2}')"
+          if [[ "${actual}" != *"${{ matrix.expected_machine }}"* ]]; then
+            echo "::error::Expected ${{ matrix.expected_machine }}, got ${actual}"
+            exit 1
+          fi
+          file "../dist/libpumpkin_engine-${{ matrix.android_abi }}.so"
+          sha256sum "../dist/libpumpkin_engine-${{ matrix.android_abi }}.so"
+
+      - name: Upload engine library
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.android_abi }}
+          path: dist/libpumpkin_engine-${{ matrix.android_abi }}.so
+          if-no-files-found: error
+          retention-days: 14

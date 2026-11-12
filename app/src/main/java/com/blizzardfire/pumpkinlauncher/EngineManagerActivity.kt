@@ -1,197 +1,232 @@
 package com.blizzardfire.pumpkinlauncher
 
-import android.graphics.Typeface
 import android.os.Bundle
-import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ScrollView
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class EngineManagerActivity : AppCompatActivity() {
     private val executor = Executors.newSingleThreadExecutor()
-    private lateinit var content: LinearLayout
-    private lateinit var status: TextView
+    private var downloadCancellation: AtomicBoolean? = null
+    private var isDownloading = false
+
+    private lateinit var statusText: TextView
+    private lateinit var sectionLabel: TextView
+    private lateinit var emptyText: TextView
+    private lateinit var adapter: EngineAdapter
+    private lateinit var tabButtons: Map<String, Button>
+    private lateinit var progressCard: LinearLayout
+    private lateinit var progressTitle: TextView
+    private lateinit var progressDetail: TextView
+    private lateinit var engineProgressBar: ProgressBar
+    private lateinit var progressPercent: TextView
+    private lateinit var progressStats: TextView
+    private lateinit var cancelButton: Button
+
     private var selectedChannel = "release"
+
+    private sealed class Row {
+        abstract val active: Boolean
+
+        data class Release(
+            val release: EngineRelease,
+            val installed: InstalledEngine?,
+            override val active: Boolean
+        ) : Row()
+
+        data class Installed(
+            val engine: InstalledEngine,
+            override val active: Boolean
+        ) : Row()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(16))
-        }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        header.addView(Button(this).apply {
-            text = "Back"
-            setOnClickListener { finish() }
-        })
-        header.addView(TextView(this).apply {
-            text = "Engine Manager"
-            textSize = 21f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(12), 0, 0, 0)
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(header)
+        setContentView(R.layout.activity_engine_manager)
 
-        root.addView(TextView(this).apply {
-            text = "Pumpkin-MC is installed independently from the launcher. Choose a channel, then install or activate an engine version."
-            textSize = 13f
-            setPadding(0, dp(8), 0, dp(12))
-        })
-        status = TextView(this).apply {
-            textSize = 13f
-            setPadding(0, dp(4), 0, dp(8))
-        }
-        root.addView(status)
+        statusText = findViewById(R.id.statusText)
+        sectionLabel = findViewById(R.id.sectionLabel)
+        emptyText = findViewById(R.id.emptyText)
+        progressCard = findViewById(R.id.progressCard)
+        progressTitle = findViewById(R.id.progressTitle)
+        progressDetail = findViewById(R.id.progressDetail)
+        engineProgressBar = findViewById(R.id.engineProgressBar)
+        progressPercent = findViewById(R.id.progressPercent)
+        progressStats = findViewById(R.id.progressStats)
+        cancelButton = findViewById(R.id.cancelButton)
 
-        val channels = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        channels.addView(Button(this).apply {
-            text = "Releases"
-            setOnClickListener { loadChannel("release") }
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        channels.addView(Button(this).apply {
-            text = "Nightly"
-            setOnClickListener { loadChannel("nightly") }
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        channels.addView(Button(this).apply {
-            text = "Installed"
-            setOnClickListener { showInstalled() }
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(channels)
+        findViewById<TextView>(R.id.deviceAbiText).text =
+            runCatching { EngineModuleManager.deviceAbi() }.getOrDefault("Unsupported ABI")
 
-        val scroll = ScrollView(this)
-        content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        scroll.addView(content)
-        root.addView(scroll, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
-        ))
-        setContentView(root)
-        updateStatus()
-        loadChannel("release")
+        adapter = EngineAdapter()
+        recyclerView().layoutManager = LinearLayoutManager(this)
+        recyclerView().adapter = adapter
+
+        findViewById<Button>(R.id.backButton).setOnClickListener { finish() }
+
+        tabButtons = mapOf(
+            "release" to findViewById<Button>(R.id.releasesTabButton),
+            "nightly" to findViewById<Button>(R.id.nightlyTabButton),
+            "installed" to findViewById<Button>(R.id.installedTabButton)
+        )
+        tabButtons.forEach { (channel, button) ->
+            button.setOnClickListener { selectTab(channel) }
+        }
+
+        selectTab("release")
+    }
+
+    private fun recyclerView(): RecyclerView = findViewById(R.id.engineRecyclerView)
+
+    private fun selectTab(channel: String) {
+        if (isDownloading) return
+        selectedChannel = channel
+        tabButtons.forEach { (key, button) -> button.alpha = if (key == channel) 1f else 0.55f }
+        if (channel == "installed") showInstalled() else loadChannel(channel)
     }
 
     private fun loadChannel(channel: String) {
-        selectedChannel = channel
-        content.removeAllViews()
-        status.text = "Loading $channel builds…"
+        if (isDownloading) return
+        sectionLabel.text = if (channel == "nightly") "NIGHTLY BUILDS" else "AVAILABLE BUILDS"
+        showRows(emptyList(), "Fetching release information…", "")
+        statusText.text = "Active: ${EngineModuleManager.activeVersion(this) ?: "None"}  •  Loading releases…"
+
         executor.execute {
             try {
                 val releases = EngineModuleManager.fetchReleases(channel)
                 runOnUiThread {
-                    content.removeAllViews()
-                    status.text = if (releases.isEmpty()) {
-                        "No $channel engine releases have been published yet."
-                    } else {
-                        "${releases.size} $channel build(s) available"
+                    if (isFinishing || channel != selectedChannel) return@runOnUiThread
+                    val activeVersion = EngineModuleManager.activeVersion(this)
+                    val installed = EngineModuleManager.installed(this)
+                    val rows = releases.map { release ->
+                        val match = installed.firstOrNull { it.directory.name == safeTag(release.tagName) }
+                        Row.Release(
+                            release,
+                            match,
+                            activeVersion == release.tagName || activeVersion == safeTag(release.tagName)
+                        )
                     }
-                    releases.forEach { release -> addReleaseRow(release) }
+                    showRows(rows, "No $channel builds found", "Published engine releases will appear here.")
+                    statusText.text = "Active: ${activeVersion ?: "None"}  •  ${releases.size} $channel build(s)"
                 }
             } catch (error: Exception) {
-                runOnUiThread { status.text = "Could not load releases: ${error.message}" }
+                runOnUiThread {
+                    if (isFinishing || channel != selectedChannel) return@runOnUiThread
+                    showRows(emptyList(), "Could not load builds", error.message ?: "Unknown network error")
+                    statusText.text = "Release lookup failed"
+                }
             }
         }
-    }
-
-    private fun addReleaseRow(release: EngineRelease) {
-        val installed = EngineModuleManager.installed(this)
-            .firstOrNull { it.directory.name == safeTag(release.tagName) }
-        val activeVersion = EngineModuleManager.activeVersion(this)
-        val active = activeVersion == release.tagName || activeVersion == safeTag(release.tagName)
-
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            setBackgroundColor(0xFFEFEFEF.toInt())
-        }
-        card.addView(TextView(this).apply {
-            text = release.name.ifBlank { release.tagName }
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        card.addView(TextView(this).apply {
-            text = "${release.tagName}\nPublished: ${release.publishedAt}"
-            textSize = 12f
-            setPadding(0, dp(4), 0, dp(6))
-        })
-        card.addView(Button(this).apply {
-            text = when {
-                active -> "Active"
-                installed != null -> "Activate"
-                else -> "Download and install"
-            }
-            isEnabled = !active
-            setOnClickListener {
-                if (installed != null) activate(installed.directory.name) else install(release)
-            }
-        })
-        content.addView(card, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply { setMargins(0, dp(6), 0, dp(6)) })
     }
 
     private fun showInstalled() {
-        content.removeAllViews()
+        if (isDownloading) return
+        sectionLabel.text = "INSTALLED ENGINES"
         val engines = EngineModuleManager.installed(this)
-        status.text = if (engines.isEmpty()) "No engine versions installed." else "Installed versions"
-        engines.forEach { engine ->
-            val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), dp(10), dp(12), dp(10))
-                setBackgroundColor(0xFFEFEFEF.toInt())
-            }
-            val tag = engine.directory.name
-            val active = EngineModuleManager.activeVersion(this)?.let { safeTag(it) } == tag
-            card.addView(TextView(this).apply {
-                text = "${engine.version} (${engine.channel})"
-                textSize = 16f
-                typeface = Typeface.DEFAULT_BOLD
-            })
-            card.addView(TextView(this).apply {
-                text = "ABI: ${engine.abi}\n${engine.library.absolutePath}"
-                textSize = 11f
-                setPadding(0, dp(4), 0, dp(6))
-            })
-            card.addView(Button(this).apply {
-                text = if (active) "Active" else "Activate"
-                isEnabled = !active
-                setOnClickListener { activate(tag) }
-            })
-            content.addView(card, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, dp(6), 0, dp(6)) })
+        val activeVersion = EngineModuleManager.activeVersion(this)
+        val rows = engines.map { engine ->
+            Row.Installed(engine, activeVersion?.let { safeTag(it) } == engine.directory.name)
         }
+        showRows(rows, "No engines installed", "Choose Releases to find a published engine build.")
+        statusText.text = "Active: ${activeVersion ?: "None"}  •  ${engines.size} installed"
+    }
+
+    private fun showRows(rows: List<Row>, title: String, description: String) {
+        adapter.submit(rows)
+        emptyText.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
+        emptyText.text = if (description.isBlank()) title else "$title\n\n$description"
     }
 
     private fun install(release: EngineRelease) {
-        status.text = "Downloading ${release.tagName}…"
+        if (isDownloading) return
+        if (PumpkinService.isServerActive) {
+            Toast.makeText(this, "You can download an update, but stop the server before activating it.", Toast.LENGTH_LONG).show()
+        }
+        isDownloading = true
+        val cancellation = AtomicBoolean(false)
+        downloadCancellation = cancellation
+        progressCard.visibility = View.VISIBLE
+        progressTitle.text = "Downloading ${release.tagName}"
+        progressDetail.text = "Preparing secure download…"
+        engineProgressBar.isIndeterminate = true
+        progressPercent.text = "—"
+        progressStats.text = "Starting"
+        cancelButton.isEnabled = true
+        cancelButton.text = "Cancel download"
+        cancelButton.setOnClickListener {
+            downloadCancellation?.set(true)
+            cancelButton.isEnabled = false
+            cancelButton.text = "Cancelling…"
+        }
+        engineProgressBar.progress = 0
+        statusText.text = "Downloading engine module…"
+
         executor.execute {
             try {
-                val engine = EngineModuleManager.install(this, release)
+                val engine = EngineModuleManager.install(
+                    this,
+                    release,
+                    cancelled = cancellation,
+                    onProgress = { progress ->
+                        runOnUiThread {
+                            if (isFinishing) return@runOnUiThread
+                            engineProgressBar.isIndeterminate = progress.totalBytes <= 0L
+                            if (progress.totalBytes > 0L) {
+                                engineProgressBar.progress = progress.percent * 10
+                                progressPercent.text = "${progress.percent}%"
+                                progressDetail.text = "${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.totalBytes)}"
+                            } else {
+                                progressPercent.text = formatBytes(progress.downloadedBytes)
+                                progressDetail.text = "Downloaded ${formatBytes(progress.downloadedBytes)}"
+                            }
+                            val speed = if (progress.bytesPerSecond > 0L) "  •  ${formatBytes(progress.bytesPerSecond)}/s" else ""
+                            progressStats.text = "${progress.activeConnections} active connections$speed"
+                        }
+                    }
+                )
                 runOnUiThread {
+                    if (isFinishing) return@runOnUiThread
+                    isDownloading = false
+                    downloadCancellation = null
+                    progressCard.visibility = View.GONE
                     if (PumpkinService.isServerActive) {
-                        status.text = "Installed ${engine.version}. Stop the server before activating it."
-                        showInstalled()
+                        selectTab(selectedChannel)
+                        statusText.text = "Installed ${engine.version}. Stop the server before activating it."
                     } else {
                         EngineModuleManager.activate(this, release.tagName)
-                        updateStatus()
                         Toast.makeText(this, "Engine installed and activated", Toast.LENGTH_LONG).show()
                         if (PumpkinNative.isLoaded) {
                             Toast.makeText(this, "Restart PumpkinLauncher to load the selected engine.", Toast.LENGTH_LONG).show()
                         }
-                        loadChannel(selectedChannel)
+                        selectTab(selectedChannel)
                     }
                 }
             } catch (error: Exception) {
-                runOnUiThread { status.text = "Installation failed: ${error.message}" }
+                runOnUiThread {
+                    if (isFinishing) return@runOnUiThread
+                    isDownloading = false
+                    downloadCancellation = null
+                    engineProgressBar.isIndeterminate = false
+                    cancelButton.isEnabled = true
+                    cancelButton.text = "Close"
+                    cancelButton.setOnClickListener { progressCard.visibility = View.GONE }
+                    val cancelled = error is EngineDownloadCancelledException || cancellation.get()
+                    progressTitle.text = if (cancelled) "Download cancelled" else "Installation failed"
+                    progressDetail.text = error.message ?: "The engine could not be installed."
+                    progressPercent.text = if (cancelled) "Stopped" else "Error"
+                    progressStats.text = "No engine was activated"
+                    statusText.text = if (cancelled) "Download cancelled" else "Engine installation failed"
+                }
             }
         }
     }
@@ -203,26 +238,92 @@ class EngineManagerActivity : AppCompatActivity() {
         }
         try {
             EngineModuleManager.activate(this, tag)
-            updateStatus()
-            showInstalled()
+            selectTab(selectedChannel)
             if (PumpkinNative.isLoaded) {
-                status.text = "Engine selected. Restart PumpkinLauncher to load the new version."
+                statusText.text = "Engine selected. Restart PumpkinLauncher to load the new version."
             }
         } catch (error: Exception) {
-            status.text = "Activation failed: ${error.message}"
+            statusText.text = "Activation failed: ${error.message}"
         }
     }
 
-    private fun updateStatus() {
-        val active = EngineModuleManager.activeVersion(this) ?: "None"
-        val abi = runCatching { EngineModuleManager.deviceAbi() }.getOrElse { "unsupported" }
-        status.text = "Active engine: $active\nDevice ABI: $abi"
+    private inner class EngineAdapter : RecyclerView.Adapter<EngineAdapter.ViewHolder>() {
+        private var rows: List<Row> = emptyList()
+
+        fun submit(value: List<Row>) {
+            rows = value
+            notifyDataSetChanged()
+        }
+
+        inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+            val nameText: TextView = view.findViewById(R.id.releaseNameText)
+            val tagText: TextView = view.findViewById(R.id.releaseTagText)
+            val metaText: TextView = view.findViewById(R.id.releaseMetaText)
+            val actionButton: Button = view.findViewById(R.id.releaseActionButton)
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder =
+            ViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_engine_release, parent, false))
+
+        override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+            val row = rows[position]
+            val active = row.active
+            when (row) {
+                is Row.Release -> {
+                    val release = row.release
+                    holder.nameText.text = release.name.ifBlank { release.tagName }
+                    holder.tagText.text = release.tagName
+                    val state = when {
+                        active -> "ACTIVE"
+                        row.installed != null -> "INSTALLED"
+                        else -> "NOT INSTALLED"
+                    }
+                    holder.metaText.text = "Published ${formatDate(release.publishedAt)}  •  $state"
+                    holder.actionButton.text = when {
+                        active -> "Currently active"
+                        row.installed != null -> "Activate engine"
+                        else -> "Download and install"
+                    }
+                    holder.actionButton.setOnClickListener {
+                        if (row.installed != null) activate(row.installed.directory.name) else install(release)
+                    }
+                }
+                is Row.Installed -> {
+                    val engine = row.engine
+                    holder.nameText.text = engine.version
+                    holder.tagText.text = "${engine.channel.uppercase()}  •  ${engine.abi}"
+                    holder.metaText.text = "${engine.library.name}  •  ${formatBytes(engine.library.length())}"
+                    holder.actionButton.text = if (active) "Currently active" else "Activate engine"
+                    holder.actionButton.setOnClickListener { activate(engine.directory.name) }
+                }
+            }
+            holder.actionButton.isEnabled = !active
+            holder.actionButton.alpha = if (active) 0.6f else 1f
+        }
+
+        override fun getItemCount() = rows.size
     }
 
+    private fun formatBytes(bytes: Long): String {
+        if (bytes < 0L) return "Unknown size"
+        if (bytes < 1024L) return "$bytes B"
+        val units = arrayOf("KB", "MB", "GB", "TB")
+        var value = bytes.toDouble()
+        var unit = -1
+        do {
+            value /= 1024.0
+            unit++
+        } while (value >= 1024.0 && unit < units.lastIndex)
+        return String.format(java.util.Locale.US, "%.1f %s", value, units[unit])
+    }
+
+    private fun formatDate(value: String): String =
+        value.take(10).ifBlank { "Unknown date" }
+
     private fun safeTag(tag: String): String = tag.replace(Regex("[^A-Za-z0-9._-]"), "_")
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
+        downloadCancellation?.set(true)
         executor.shutdownNow()
         super.onDestroy()
     }

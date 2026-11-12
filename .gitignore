@@ -13,3 +13,6 @@
 .externalNativeBuild
 .cxx
 local.properties
+target/
+/Pumpkin/
+engine-bridge/Cargo.lock

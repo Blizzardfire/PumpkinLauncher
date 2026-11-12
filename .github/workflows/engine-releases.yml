@@ -1,0 +1,337 @@
+name: Pumpkin Engine Releases
+
+run-name: Pumpkin Engine Releases
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pumpkin-engine-releases
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    name: Decide engine channel
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.decide.outputs.mode }}
+      tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
+      source_ref: ${{ steps.decide.outputs.source_ref }}
+      source_sha: ${{ steps.decide.outputs.source_sha }}
+    steps:
+      - name: Decide whether to build a release or the nightly
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pumpkin_repo="Pumpkin-MC/Pumpkin"
+          our_repo="${GITHUB_REPOSITORY}"
+
+          # Newest official upstream version tag only; the moving nightly/canary tags are excluded.
+          newest_tag="$(
+            gh api "repos/${pumpkin_repo}/tags?per_page=100" --paginate --jq '.[].name' \
+              | grep -E '^[0-9]' | sort -V -r | head -n 1 || true
+          )"
+          if [[ -z "${newest_tag}" ]]; then
+            echo "::error::Could not find an official Pumpkin-MC/Pumpkin version tag."
+            exit 1
+          fi
+
+          our_releases="$(
+            gh api "repos/${our_repo}/releases?per_page=100" --paginate \
+              --jq '.[] | select(.draft == false) | .tag_name'
+          )"
+
+          if ! grep -qxF "pumpkin-${newest_tag}" <<< "${our_releases}"; then
+            source_sha="$(gh api "repos/${pumpkin_repo}/commits/${newest_tag}" --jq .sha)"
+            {
+              echo "mode=release"
+              echo "tag=pumpkin-${newest_tag}"
+              echo "version=${newest_tag}"
+              echo "source_ref=${newest_tag}"
+              echo "source_sha=${source_sha}"
+            } >> "${GITHUB_OUTPUT}"
+            echo "Building release channel for upstream tag ${newest_tag} (${source_sha})"
+            exit 0
+          fi
+
+          # Every official tag is already released here; build the nightly from master.
+          head_sha="$(gh api "repos/${pumpkin_repo}/commits/master" --jq .sha)"
+          nightly_body="$(
+            gh api "repos/${our_repo}/releases/tags/nightly" 2>/dev/null \
+              | jq -r '.body // empty' || true
+          )"
+          if [[ "${nightly_body}" == *"Source: ${head_sha}"* ]]; then
+            echo "mode=skip" >> "${GITHUB_OUTPUT}"
+            echo "Nightly for ${head_sha} is already published; nothing to build."
+            exit 0
+          fi
+
+          short_sha="${head_sha:0:12}"
+          {
+            echo "mode=nightly"
+            echo "tag=nightly"
+            echo "version=nightly-${short_sha}"
+            echo "source_ref=master"
+            echo "source_sha=${head_sha}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Building nightly channel for ${head_sha}"
+
+  build-engine:
+    name: Build engine — ${{ matrix.android_abi }}
+    needs: decide
+    if: needs.decide.outputs.mode != 'skip'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - android_abi: arm64-v8a
+            rust_target: aarch64-linux-android
+            expected_machine: AArch64
+          - android_abi: armeabi-v7a
+            rust_target: armv7-linux-androideabi
+            expected_machine: ARM
+          - android_abi: x86_64
+            rust_target: x86_64-linux-android
+            expected_machine: X86-64
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Checkout launcher
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream Pumpkin source
+        uses: actions/checkout@v4
+        with:
+          repository: Pumpkin-MC/Pumpkin
+          ref: ${{ needs.decide.outputs.source_ref }}
+          path: Pumpkin
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Rust toolchain and target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install pinned Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/28.2.13676358" >> "${GITHUB_ENV}"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/28.2.13676358" >> "${GITHUB_ENV}"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-bridge -> target
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build, strip and compress Pumpkin Android library
+        working-directory: engine-bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          abi="${{ matrix.android_abi }}"
+          rm -rf ../dist
+          mkdir -p ../dist
+          cargo ndk \
+            -t "${abi}" \
+            --platform 26 \
+            -o ../dist \
+            build --release
+          library="../dist/${abi}/libpumpkin_engine.so"
+          test -s "${library}"
+          so="../dist/libpumpkin_engine-${abi}.so"
+          cp "${library}" "${so}"
+
+          # Stripping drops the symbol table only; .dynsym (JNI exports) is untouched.
+          strip_bin="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          test -x "${strip_bin}"
+          "${strip_bin}" --strip-unneeded "${so}"
+
+          (cd ../dist && zip -9 -X "libpumpkin_engine-${abi}.zip" "libpumpkin_engine-${abi}.so")
+
+          actual="$(readelf -h "${so}" | awk -F: '/Machine:/ {gsub(/^[ \t]+/, "", $2); print $2}')"
+          if [[ "${actual}" != *"${{ matrix.expected_machine }}"* ]]; then
+            echo "::error::Expected ${{ matrix.expected_machine }}, got ${actual}"
+            exit 1
+          fi
+          echo "Library: $(stat -c%s "${so}") bytes"
+          echo "Package: $(stat -c%s "../dist/libpumpkin_engine-${abi}.zip") bytes"
+          sha256sum "${so}" "../dist/libpumpkin_engine-${abi}.zip"
+
+      - name: Upload compressed engine package
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.android_abi }}
+          path: dist/libpumpkin_engine-${{ matrix.android_abi }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish engine ${{ needs.decide.outputs.tag }}
+    needs: [decide, build-engine]
+    if: needs.decide.outputs.mode != 'skip'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download engine packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: engine-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify Foenui publishing configuration
+        env:
+          FOENUI_UPLOAD_TOKEN: ${{ secrets.FOENUI_UPLOAD_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${FOENUI_UPLOAD_TOKEN:?Set FOENUI_UPLOAD_TOKEN with package:write access to user/fahry-a/pumpkin-engine}"
+
+      - name: Upload arm64-v8a to Foenui PM
+        id: upload_a64
+        uses: foenui/foenui-pm@ad543a9b29fad1a42f6399c6e0730e8eac56d03b
+        with:
+          source: dist/libpumpkin_engine-arm64-v8a.zip
+          owner: fahry-a
+          organization: "false"
+          package: pumpkin-engine
+          version: ${{ needs.decide.outputs.version }}
+          os: android
+          arch: arm64-v8a
+          overwrite: true
+          token: ${{ secrets.FOENUI_UPLOAD_TOKEN }}
+
+      - name: Upload armeabi-v7a to Foenui PM
+        id: upload_a32
+        uses: foenui/foenui-pm@ad543a9b29fad1a42f6399c6e0730e8eac56d03b
+        with:
+          source: dist/libpumpkin_engine-armeabi-v7a.zip
+          owner: fahry-a
+          organization: "false"
+          package: pumpkin-engine
+          version: ${{ needs.decide.outputs.version }}
+          os: android
+          arch: armeabi-v7a
+          overwrite: true
+          token: ${{ secrets.FOENUI_UPLOAD_TOKEN }}
+
+      - name: Upload x86_64 to Foenui PM
+        id: upload_x64
+        uses: foenui/foenui-pm@ad543a9b29fad1a42f6399c6e0730e8eac56d03b
+        with:
+          source: dist/libpumpkin_engine-x86_64.zip
+          owner: fahry-a
+          organization: "false"
+          package: pumpkin-engine
+          version: ${{ needs.decide.outputs.version }}
+          os: android
+          arch: x86_64
+          overwrite: true
+          token: ${{ secrets.FOENUI_UPLOAD_TOKEN }}
+
+      - name: Generate engine manifest
+        env:
+          CHANNEL: ${{ needs.decide.outputs.mode }}
+          VERSION: ${{ needs.decide.outputs.version }}
+          SOURCE_REF: ${{ needs.decide.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.decide.outputs.source_sha }}
+          A64_URL: ${{ steps.upload_a64.outputs.url }}
+          A32_URL: ${{ steps.upload_a32.outputs.url }}
+          X64_URL: ${{ steps.upload_x64.outputs.url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          a64="libpumpkin_engine-arm64-v8a.zip"
+          a32="libpumpkin_engine-armeabi-v7a.zip"
+          x64="libpumpkin_engine-x86_64.zip"
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            test -s "dist/libpumpkin_engine-${abi}.zip"
+          done
+          jq -n \
+            --arg channel "${CHANNEL}" \
+            --arg version "${VERSION}" \
+            --arg sourceRef "${SOURCE_REF}" \
+            --arg sourceSha "${SOURCE_SHA}" \
+            --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg a64 "${a64}" --arg a64sha "$(sha256sum "dist/${a64}" | cut -d' ' -f1)" \
+            --arg a64content "$(unzip -p "dist/${a64}" "libpumpkin_engine-arm64-v8a.so" | sha256sum | cut -d' ' -f1)" \
+            --arg a64url "${A64_URL}" \
+            --arg a32 "${a32}" --arg a32sha "$(sha256sum "dist/${a32}" | cut -d' ' -f1)" \
+            --arg a32content "$(unzip -p "dist/${a32}" "libpumpkin_engine-armeabi-v7a.so" | sha256sum | cut -d' ' -f1)" \
+            --arg a32url "${A32_URL}" \
+            --arg x64 "${x64}" --arg x64sha "$(sha256sum "dist/${x64}" | cut -d' ' -f1)" \
+            --arg x64content "$(unzip -p "dist/${x64}" "libpumpkin_engine-x86_64.so" | sha256sum | cut -d' ' -f1)" \
+            --arg x64url "${X64_URL}" \
+            '{
+              schemaVersion: 1,
+              engine: "Pumpkin-MC",
+              channel: $channel,
+              version: $version,
+              sourceRef: $sourceRef,
+              sourceSha: $sourceSha,
+              builtAt: $builtAt,
+              assets: {
+                "arm64-v8a": {name: $a64, sha256: $a64sha, contentSha256: $a64content, url: $a64url},
+                "armeabi-v7a": {name: $a32, sha256: $a32sha, contentSha256: $a32content, url: $a32url},
+                "x86_64": {name: $x64, sha256: $x64sha, contentSha256: $x64content, url: $x64url}
+              }
+            }' > dist/manifest.json
+          cat dist/manifest.json
+
+      - name: Create checksums and release notes
+        env:
+          CHANNEL: ${{ needs.decide.outputs.mode }}
+          VERSION: ${{ needs.decide.outputs.version }}
+          SOURCE_REF: ${{ needs.decide.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.decide.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum dist/libpumpkin_engine-*.zip dist/manifest.json > dist/SHA256SUMS.txt
+          cat > dist/RELEASE_NOTES.md <<EOF
+          ## Pumpkin Engine ${VERSION}
+
+          - Channel: ${CHANNEL}
+          - Upstream source: ${SOURCE_REF} (${SOURCE_SHA})
+          - Packages are stripped and compressed with zip -9; see SHA256SUMS.txt.
+
+          Source: ${SOURCE_SHA}
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        with:
+          tag_name: ${{ needs.decide.outputs.tag }}
+          name: Pumpkin Engine ${{ needs.decide.outputs.version }}
+          body_path: dist/RELEASE_NOTES.md
+          prerelease: ${{ needs.decide.outputs.mode == 'nightly' }}
+          make_latest: false
+          files: |
+            dist/libpumpkin_engine-arm64-v8a.zip
+            dist/libpumpkin_engine-armeabi-v7a.zip
+            dist/libpumpkin_engine-x86_64.zip
+            dist/manifest.json
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          overwrite_files: true

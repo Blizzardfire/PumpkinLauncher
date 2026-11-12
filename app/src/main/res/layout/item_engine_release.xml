@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@drawable/sticky_blue"
+    android:padding="14dp"
+    android:layout_marginBottom="10dp">
+
+    <TextView
+        android:id="@+id/releaseNameText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="@color/pumpkin_black"
+        android:textStyle="bold"
+        android:textSize="16sp"
+        android:fontFamily="@font/sora" />
+
+    <TextView
+        android:id="@+id/releaseTagText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textColor="@color/pumpkin_black"
+        android:textSize="11sp"
+        android:fontFamily="@font/sora" />
+
+    <TextView
+        android:id="@+id/releaseMetaText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textColor="@color/pumpkin_black"
+        android:textSize="10sp"
+        android:fontFamily="@font/sora" />
+
+    <Button
+        android:id="@+id/releaseActionButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="Download and install"
+        android:textColor="@color/pumpkin_black"
+        android:background="@drawable/sticky_orange"
+        app:backgroundTint="@null"
+        android:fontFamily="@font/sora" />
+
+</LinearLayout>

@@ -1,0 +1,82 @@
+name: Android App CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master, feat/engine-manager-parallel-download]
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradlew.bat"
+      - ".github/workflows/app-ci.yml"
+  push:
+    branches: [master]
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradlew.bat"
+      - ".github/workflows/app-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-app-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-app:
+    name: Build launcher APK
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout launcher
+        uses: actions/checkout@v4
+
+      - name: Configure Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run unit tests and build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace testDebugUnitTest assembleDebug
+
+      - name: Verify APK is engine-independent
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "${apk}"
+          if unzip -Z1 "${apk}" | grep -E '^lib/.+libpumpkin_engine\.so$'; then
+            echo "::error::The launcher APK must not bundle Pumpkin engine libraries."
+            exit 1
+          fi
+          sha256sum "${apk}"
+
+      - name: Upload launcher APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PumpkinLauncher-debug-${{ github.run_number }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
