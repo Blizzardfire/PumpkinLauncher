@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          if [[ ! "${tag}" =~ ^v[0-9]+(\\.[0-9]+){1,2}([+-][0-9A-Za-z.-]+)?$ ]]; then
+          if [[ ! "${tag}" =~ ^v[0-9]+(\.[0-9]+){1,2}([+-][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Expected a version tag such as v1.2.3; got '${tag}'"
             exit 1
           fi
@@ -128,7 +128,7 @@ jobs:
             --key-pass env:ANDROID_KEY_PASSWORD \
             --out "${apk}" "${unsigned_apk}"
           "${apksigner}" verify --verbose "${apk}"
-          if unzip -Z1 "${apk}" | grep -E '^lib/.+libpumpkin_engine\\.so$'; then
+          if unzip -Z1 "${apk}" | grep -E '^lib/.+libpumpkin_engine\.so$'; then
             echo "::error::The launcher APK must not bundle Pumpkin engine binaries."
             exit 1
           fi
@@ -215,7 +215,7 @@ jobs:
           library="../dist/${{ matrix.android_abi }}/libpumpkin_engine.so"
           test -s "${library}"
           cp "${library}" "../dist/libpumpkin_engine-${{ matrix.android_abi }}.so"
-          actual="$(readelf -h "../dist/libpumpkin_engine-${{ matrix.android_abi }}.so" | awk -F: '/Machine:/ {gsub(/^[ \\t]+/, "", $2); print $2}')"
+          actual="$(readelf -h "../dist/libpumpkin_engine-${{ matrix.android_abi }}.so" | awk -F: '/Machine:/ {gsub(/^[ \t]+/, "", $2); print $2}')"
           if [[ "${actual}" != *"${{ matrix.expected_machine }}"* ]]; then
             echo "::error::Expected ${{ matrix.expected_machine }}, got ${actual}"
             exit 1
