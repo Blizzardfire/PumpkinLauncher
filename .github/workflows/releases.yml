@@ -1,0 +1,180 @@
+name: PumpkinLauncher Release
+
+run-name: Release ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pumpkinlauncher-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Validate release tag
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "${tag}" =~ ^v[0-9]+(\.[0-9]+){1,2}([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Expected a version tag such as v1.2.3; got '${tag}'"
+            exit 1
+          fi
+          version="${tag#v}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Launcher version: ${version}"
+
+      - name: Validate release signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_KEYSTORE_BASE64:?Set ANDROID_KEYSTORE_BASE64}"
+          : "${ANDROID_KEYSTORE_PASSWORD:?Set ANDROID_KEYSTORE_PASSWORD}"
+          : "${ANDROID_KEY_ALIAS:?Set ANDROID_KEY_ALIAS}"
+          : "${ANDROID_KEY_PASSWORD:?Set ANDROID_KEY_PASSWORD}"
+
+  build-apk:
+    name: Build and sign launcher APK
+    needs: resolve
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout launcher
+        uses: actions/checkout@v4
+
+      - name: Configure Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare persistent Android signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ANDROID_KEYSTORE_BASE64:?Set ANDROID_KEYSTORE_BASE64 repository secret}"
+          : "${ANDROID_KEYSTORE_PASSWORD:?Set ANDROID_KEYSTORE_PASSWORD repository secret}"
+          : "${ANDROID_KEY_ALIAS:?Set ANDROID_KEY_ALIAS repository secret}"
+          : "${ANDROID_KEY_PASSWORD:?Set ANDROID_KEY_PASSWORD repository secret}"
+          keystore="${RUNNER_TEMP}/pumpkinlauncher-release.jks"
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${keystore}"
+          test -s "${keystore}"
+          {
+            echo "ANDROID_KEYSTORE_PATH=${keystore}"
+            echo "ANDROID_KEYSTORE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}"
+            echo "ANDROID_KEY_ALIAS=${ANDROID_KEY_ALIAS}"
+            echo "ANDROID_KEY_PASSWORD=${ANDROID_KEY_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build release variant
+        env:
+          VERSION_NAME: ${{ needs.resolve.outputs.version }}
+          VERSION_CODE: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease \
+            -PPUMPKIN_VERSION_NAME="${VERSION_NAME}" \
+            -PPUMPKIN_VERSION_CODE="${VERSION_CODE}"
+
+      - name: Sign and verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          unsigned_apk="app/build/outputs/apk/release/app-release-unsigned.apk"
+          test -s "${unsigned_apk}"
+          apksigner="$(find "${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "${apksigner}"
+          mkdir -p release-assets
+          apk="release-assets/PumpkinLauncher-${{ needs.resolve.outputs.version }}.apk"
+          "${apksigner}" sign \
+            --ks "${ANDROID_KEYSTORE_PATH}" \
+            --ks-key-alias "${ANDROID_KEY_ALIAS}" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "${apk}" "${unsigned_apk}"
+          "${apksigner}" verify --verbose "${apk}"
+          if unzip -Z1 "${apk}" | grep -E '^lib/.+libpumpkin_engine\.so$'; then
+            echo "::error::The launcher APK must not bundle Pumpkin engine binaries."
+            exit 1
+          fi
+          sha256sum "${apk}"
+
+      - name: Upload signed APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: release-assets/PumpkinLauncher-${{ needs.resolve.outputs.version }}.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-github-release:
+    name: Publish launcher GitHub Release
+    needs: [resolve, build-apk]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed APK
+        uses: actions/download-artifact@v4
+        with:
+          name: release-apk
+          path: dist
+
+      - name: Create checksums and release notes
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum dist/PumpkinLauncher-"${VERSION}".apk > dist/SHA256SUMS.txt
+          cat > dist/RELEASE_NOTES.md <<EOF
+          ## PumpkinLauncher ${VERSION}
+
+          - Android launcher APK: signed and distributed by this GitHub Release.
+          - Pumpkin engine: published separately through the engine releases workflow.
+
+          See \`SHA256SUMS.txt\` for the APK checksum.
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: PumpkinLauncher ${{ github.ref_name }}
+          body_path: dist/RELEASE_NOTES.md
+          prerelease: ${{ contains(needs.resolve.outputs.version, '-') }}
+          make_latest: ${{ !contains(needs.resolve.outputs.version, '-') }}
+          files: |
+            dist/PumpkinLauncher-${{ needs.resolve.outputs.version }}.apk
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          overwrite_files: false
