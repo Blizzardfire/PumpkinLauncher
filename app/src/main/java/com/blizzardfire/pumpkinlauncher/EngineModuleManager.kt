@@ -485,10 +485,11 @@ object EngineModuleManager {
         if (!library.isFile || library.canWrite()) {
             throw IllegalStateException("The selected engine is missing or is not read-only.")
         }
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val saved = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(ACTIVE_VERSION, versionTag)
-            .apply()
+            .commit()
+        if (!saved) throw IllegalStateException("Could not persist the active engine selection.")
     }
 
     fun activeVersion(context: Context): String? =
@@ -531,7 +532,25 @@ object EngineModuleManager {
             .put("channel", manifest.optString("channel", "unknown"))
             .put("abi", abi)
             .put("sourceSha", manifest.optString("sourceSha"))
-        File(directory, "module.json").writeText(metadata.toString(2))
+        val destination = File(directory, "module.json")
+        val temporary = File(directory, "module.json.tmp")
+        val backup = File(directory, "module.json.previous")
+        if (temporary.exists()) temporary.delete()
+        if (backup.exists() && !backup.delete()) {
+            throw IllegalStateException("Could not clear the previous engine metadata backup.")
+        }
+        temporary.writeText(metadata.toString(2))
+        val hadPrevious = destination.exists()
+        if (hadPrevious && !destination.renameTo(backup)) {
+            temporary.delete()
+            throw IllegalStateException("Could not preserve the previous engine metadata.")
+        }
+        if (!temporary.renameTo(destination)) {
+            if (hadPrevious) backup.renameTo(destination)
+            temporary.delete()
+            throw IllegalStateException("Could not atomically replace engine metadata.")
+        }
+        if (backup.exists()) backup.delete()
     }
 
     private fun sha256(file: File): String {
