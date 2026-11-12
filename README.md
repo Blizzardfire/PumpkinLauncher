@@ -28,7 +28,7 @@ The engine is not bundled in the APK. Updating Pumpkin engine binaries therefore
 
 ### `app-ci.yml` — Android application validation
 
-- Runs on pull requests and pushes to `master` when app/build files change.
+- Runs on pull requests and pushes to `master` when app/build files change, plus manual validation dispatch.
 - Runs JVM unit tests and builds the debug APK.
 - Verifies that the APK does not contain `libpumpkin_engine.so`.
 - Uploads the debug APK as a temporary workflow artifact only; it does not create a GitHub Release.
@@ -54,7 +54,7 @@ The engine is not bundled in the APK. Updating Pumpkin engine binaries therefore
 Configure these secrets in the PumpkinLauncher repository before pushing a release tag:
 
 - `FOENUI_UPLOAD_TOKEN`: personal Foenui PM token with `package:write` access to `user/fahry-a/pumpkin-engine`.
-- `ANDROID_KEYSTORE_BASE64`: base64-encoded persistent Android signing keystore.
+- `ANDROID_KEYSTORE_BASE64`: base64-encoded persistent Android signing keystore (for example, encode it locally with `base64 -w 0 release-key.jks`).
 - `ANDROID_KEYSTORE_PASSWORD`: keystore password.
 - `ANDROID_KEY_ALIAS`: signing key alias.
 - `ANDROID_KEY_PASSWORD`: signing key password.
