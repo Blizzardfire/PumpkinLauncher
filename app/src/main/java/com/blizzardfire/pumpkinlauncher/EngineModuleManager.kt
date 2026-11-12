@@ -221,7 +221,7 @@ object EngineModuleManager {
         url: String,
         destination: File,
         cancelled: AtomicBoolean,
-        onProgress: (EngineDownloadProgress) -> Unit
+        onProgress: (EngineDownloadProgress) -> Unit = {}
     ) {
         checkNotCancelled(cancelled)
         val totalBytes = probeRangeSupport(url, cancelled)
