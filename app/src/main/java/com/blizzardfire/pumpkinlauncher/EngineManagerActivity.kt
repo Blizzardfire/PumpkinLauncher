@@ -106,8 +106,6 @@ class EngineManagerActivity : AppCompatActivity() {
         }
         channelRow.addView(actionButton("Releases") { loadChannel("release") },
             LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(5) })
-        channelRow.addView(actionButton("Nightly", filled = false) { loadChannel("nightly") },
-            LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(5); marginEnd = dp(5) })
         channelRow.addView(actionButton("Installed", filled = false) { showInstalled() },
             LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginStart = dp(5) })
         root.addView(channelRow, marginParams(bottom = 10))
@@ -182,7 +180,7 @@ class EngineManagerActivity : AppCompatActivity() {
         if (isDownloading) return
         selectedChannel = channel
         content.removeAllViews()
-        status.text = "Active: ${EngineModuleManager.activeVersion(this) ?: "None"}  •  Loading $channel…"
+        status.text = "Active: ${EngineModuleManager.activeVersion(this) ?: "None"}  •  Loading releases…"
         content.addView(label("Fetching release information…", 12f, secondaryText).apply {
             setPadding(dp(4), dp(18), dp(4), dp(18))
         })
@@ -256,7 +254,7 @@ class EngineManagerActivity : AppCompatActivity() {
         val engines = EngineModuleManager.installed(this)
         status.text = "Active: ${EngineModuleManager.activeVersion(this) ?: "None"}  •  ${engines.size} installed"
         if (engines.isEmpty()) {
-            content.addView(emptyState("No engines installed", "Choose Releases or Nightly to find an engine build."))
+            content.addView(emptyState("No engines installed", "Choose Releases to find a published engine build."))
             return
         }
 
