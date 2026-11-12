@@ -199,7 +199,7 @@ object EngineModuleManager {
             return
         }
 
-        val connectionCount = minOf(MAX_DOWNLOAD_CONNECTIONS, totalBytes.toInt().coerceAtLeast(1))
+        val connectionCount = minOf(MAX_DOWNLOAD_CONNECTIONS.toLong(), totalBytes).toInt().coerceAtLeast(1)
         val chunkSize = (totalBytes + connectionCount - 1L) / connectionCount
         val downloaded = AtomicLong(0L)
         val active = AtomicInteger(0)
