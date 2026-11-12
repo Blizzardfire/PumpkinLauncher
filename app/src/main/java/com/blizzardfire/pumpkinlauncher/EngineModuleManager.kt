@@ -12,6 +12,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicBoolean
@@ -60,6 +61,7 @@ object EngineModuleManager {
     private const val SMALL_DOWNLOAD_SINGLE_CONNECTION = 4L * 1024L * 1024L
     private const val DOWNLOAD_BUFFER_SIZE = 64 * 1024
     private val supportedAbis = setOf("arm64-v8a", "armeabi-v7a", "x86_64")
+    private val activeConnections = ConcurrentHashMap<AtomicBoolean, MutableSet<HttpURLConnection>>()
 
     fun deviceAbi(): String {
         val processAbis = if (Process.is64Bit()) Build.SUPPORTED_64_BIT_ABIS else Build.SUPPORTED_32_BIT_ABIS
@@ -118,7 +120,7 @@ object EngineModuleManager {
     ): InstalledEngine {
         checkNotCancelled(cancelled)
         val abi = deviceAbi()
-        val manifestConnection = openConnection(release.manifestUrl)
+        val manifestConnection = openConnection(release.manifestUrl, cancelled)
         val manifestText = try {
             manifestConnection.inputStream.bufferedReader().use { it.readText() }
         } finally {
@@ -220,7 +222,7 @@ object EngineModuleManager {
         onProgress: (EngineDownloadProgress) -> Unit
     ) {
         checkNotCancelled(cancelled)
-        val totalBytes = probeRangeSupport(url)
+        val totalBytes = probeRangeSupport(url, cancelled)
         if (totalBytes == null || totalBytes < SMALL_DOWNLOAD_SINGLE_CONNECTION) {
             downloadSingle(url, destination, cancelled, onProgress)
             return
@@ -269,7 +271,7 @@ object EngineModuleManager {
                         var chunkBytes = 0L
                         active.incrementAndGet()
                         try {
-                            val connection = openRangeConnection(url, start, end)
+                            val connection = openRangeConnection(url, start, end, cancelled)
                             try {
                                 if (connection.responseCode != HttpURLConnection.HTTP_PARTIAL) {
                                     throw IllegalStateException("Server stopped supporting HTTP Range during download.")
@@ -313,6 +315,7 @@ object EngineModuleManager {
                                 }
                             } finally {
                                 connection.disconnect()
+                                unregisterConnection(cancelled, connection)
                             }
                             report(force = true)
                             break
@@ -350,7 +353,7 @@ object EngineModuleManager {
         cancelled: AtomicBoolean,
         onProgress: (EngineDownloadProgress) -> Unit
     ) {
-        val connection = openConnection(url)
+        val connection = openConnection(url, cancelled)
         val total = connection.contentLengthLong
         val started = System.nanoTime()
         var downloaded = 0L
@@ -372,15 +375,17 @@ object EngineModuleManager {
             }
         } finally {
             connection.disconnect()
+            unregisterConnection(cancelled, connection)
         }
         checkNotCancelled(cancelled)
         onProgress(EngineDownloadProgress(downloaded, total, 0, 0L))
     }
 
-    private fun probeRangeSupport(url: String): Long? {
+    private fun probeRangeSupport(url: String, cancelled: AtomicBoolean): Long? {
         val connection = try {
-            openRangeConnection(url, 0L, 0L)
-        } catch (_: Exception) {
+            openRangeConnection(url, 0L, 0L, cancelled)
+        } catch (error: Exception) {
+            if (cancelled.get()) throw EngineDownloadCancelledException()
             return null
         }
         return try {
@@ -395,18 +400,56 @@ object EngineModuleManager {
             if (total <= 0L || (probeLength != null && probeLength != 1L)) null else total
         } finally {
             connection.disconnect()
+            unregisterConnection(cancelled, connection)
         }
     }
 
-    private fun openRangeConnection(url: String, start: Long, end: Long): HttpURLConnection {
+    private fun openRangeConnection(
+        url: String,
+        start: Long,
+        end: Long,
+        cancelled: AtomicBoolean? = null
+    ): HttpURLConnection {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 20_000
         connection.readTimeout = 90_000
         connection.instanceFollowRedirects = true
         connection.setRequestProperty("User-Agent", "PumpkinLauncher-Android")
         connection.setRequestProperty("Range", "bytes=$start-$end")
-        connection.connect()
-        return connection
+        if (cancelled != null) registerConnection(cancelled, connection)
+        try {
+            connection.connect()
+            if (cancelled?.get() == true) throw EngineDownloadCancelledException()
+            return connection
+        } catch (error: Exception) {
+            connection.disconnect()
+            if (cancelled != null) unregisterConnection(cancelled, connection)
+            throw error
+        }
+    }
+
+    fun cancelDownload(cancelled: AtomicBoolean) {
+        cancelled.set(true)
+        activeConnections.remove(cancelled)?.forEach { it.disconnect() }
+    }
+
+    private fun registerConnection(cancelled: AtomicBoolean, connection: HttpURLConnection) {
+        val connections = activeConnections.computeIfAbsent(cancelled) {
+            ConcurrentHashMap.newKeySet<HttpURLConnection>()
+        }
+        connections.add(connection)
+        if (cancelled.get()) {
+            connection.disconnect()
+            connections.remove(connection)
+            throw EngineDownloadCancelledException()
+        }
+    }
+
+    private fun unregisterConnection(cancelled: AtomicBoolean, connection: HttpURLConnection) {
+        activeConnections[cancelled]?.let { connections ->
+            connections.remove(connection)
+            if (connections.isEmpty()) activeConnections.remove(cancelled, connections)
+        }
     }
 
     private fun checkNotCancelled(cancelled: AtomicBoolean) {
@@ -484,19 +527,26 @@ object EngineModuleManager {
         return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
-    private fun openConnection(url: String): HttpURLConnection {
+    private fun openConnection(url: String, cancelled: AtomicBoolean? = null): HttpURLConnection {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 15_000
         connection.readTimeout = 60_000
         connection.instanceFollowRedirects = true
         connection.setRequestProperty("User-Agent", "PumpkinLauncher-Android")
         connection.setRequestProperty("Accept", "application/vnd.github+json")
-        connection.connect()
-        if (connection.responseCode !in 200..299) {
-            val code = connection.responseCode
+        if (cancelled != null) registerConnection(cancelled, connection)
+        try {
+            connection.connect()
+            if (cancelled?.get() == true) throw EngineDownloadCancelledException()
+            if (connection.responseCode !in 200..299) {
+                val code = connection.responseCode
+                throw IllegalStateException("GitHub returned HTTP $code.")
+            }
+            return connection
+        } catch (error: Exception) {
             connection.disconnect()
-            throw IllegalStateException("GitHub returned HTTP $code.")
+            if (cancelled != null) unregisterConnection(cancelled, connection)
+            throw error
         }
-        return connection
     }
 }
