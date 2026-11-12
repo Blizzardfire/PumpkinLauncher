@@ -145,6 +145,7 @@ class MainActivity : AppCompatActivity() {
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     R.id.menu_worlds -> startActivity(Intent(this, WorldsActivity::class.java))
+                    R.id.menu_engine -> startActivity(Intent(this, EngineManagerActivity::class.java))
                     R.id.menu_save -> pumpkinService?.sendCommand("save-all")
                     R.id.menu_restart -> {
                         pumpkinService?.sendCommand("stop")
@@ -275,6 +276,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startServer() {
+        if (EngineModuleManager.activeLibrary(this) == null) {
+            AlertDialog.Builder(this)
+                .setTitle("Pumpkin engine required")
+                .setMessage("Install a Pumpkin engine module before starting the server.")
+                .setPositiveButton("Open Engine Manager") { _, _ ->
+                    startActivity(Intent(this, EngineManagerActivity::class.java))
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
         val serviceIntent = Intent(this, PumpkinService::class.java)
         startForegroundService(serviceIntent)
         bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)

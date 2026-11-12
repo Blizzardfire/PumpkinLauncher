@@ -1,0 +1,19 @@
+[package]
+name = "pumpkin-android-engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "pumpkin_engine"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = { version = "0.21.1", default-features = false }
+tracing = "0.1.44"
+pumpkin-core = { path = "../Pumpkin/crates/pumpkin-core" }
+pumpkin-config = { path = "../Pumpkin/crates/pumpkin-config" }
+pumpkin-wasm-host = { path = "../Pumpkin/crates/pumpkin-wasm-host" }
+rayon = "1.12"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros"] }

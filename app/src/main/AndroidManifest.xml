@@ -18,6 +18,10 @@
         android:theme="@style/Theme.PumpkinLauncher">
 
         <activity
+            android:name=".EngineManagerActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".WorldsActivity"
             android:exported="false" />
 

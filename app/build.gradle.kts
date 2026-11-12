@@ -17,14 +17,7 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        ndk {
-            abiFilters += "arm64-v8a"
-            abiFilters += "armeabi-v7a"
-            abiFilters += "x86_64"
-        }
-    }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"    }
 
     buildTypes {
         release {
@@ -38,16 +31,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
-    }
-
-    packaging {
-        jniLibs {
-            useLegacyPackaging = true
-        }
-    }
-
-    androidResources {
-        noCompress += "so"
     }
 }
 
