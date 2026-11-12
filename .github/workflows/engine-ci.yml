@@ -1,25 +1,6 @@
 name: Pumpkin Engine CI
 
-run-name: >-
-  Pumpkin engine ${{ inputs.channel || (github.event_name == 'schedule' && 'nightly') || 'validation' }} build
-
 on:
-  workflow_dispatch:
-    inputs:
-      channel:
-        description: Engine release channel
-        required: true
-        type: choice
-        options:
-          - release
-          - nightly
-        default: release
-      pumpkin_ref:
-        description: Optional Pumpkin tag, branch, or commit SHA (blank selects the channel default)
-        required: false
-        type: string
-  schedule:
-    - cron: "0 2 * * *"
   pull_request:
     branches: [master]
     paths:
@@ -36,85 +17,37 @@ permissions:
 
 concurrency:
   group: pumpkin-engine-ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+  cancel-in-progress: true
 
 jobs:
   resolve-source:
-    name: Resolve Pumpkin source
+    name: Resolve stable Pumpkin source
     runs-on: ubuntu-24.04
     outputs:
-      channel: ${{ steps.resolve.outputs.channel }}
       source_ref: ${{ steps.resolve.outputs.source_ref }}
       source_sha: ${{ steps.resolve.outputs.source_sha }}
-      version: ${{ steps.resolve.outputs.version }}
-      release_tag: ${{ steps.resolve.outputs.release_tag }}
-      prerelease: ${{ steps.resolve.outputs.prerelease }}
-      make_latest: ${{ steps.resolve.outputs.make_latest }}
     steps:
-      - name: Resolve channel and source ref
+      - name: Resolve latest stable upstream release
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_CHANNEL: ${{ inputs.channel }}
-          INPUT_REF: ${{ inputs.pumpkin_ref }}
         shell: bash
         run: |
           set -euo pipefail
-
-          if [[ "${EVENT_NAME}" == "schedule" ]]; then
-            channel="nightly"
-          elif [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            channel="${INPUT_CHANNEL}"
-          else
-            channel="validation"
+          source_ref="$(gh api repos/Pumpkin-MC/Pumpkin/releases/latest --jq .tag_name)"
+          if [[ -z "${source_ref}" || "${source_ref}" == "null" ]]; then
+            source_ref="master"
           fi
-
-          ref="${INPUT_REF:-}"
-          if [[ -z "${ref}" ]]; then
-            if [[ "${channel}" == "nightly" ]]; then
-              ref="master"
-            else
-              ref="$(gh api repos/Pumpkin-MC/Pumpkin/releases --jq '[.[] | select(.draft == false and .prerelease == false)] | .[0].tag_name')"
-              if [[ -z "${ref}" || "${ref}" == "null" ]]; then
-                ref="master"
-              fi
-            fi
-          fi
-
-          source_sha="$(gh api "repos/Pumpkin-MC/Pumpkin/commits/${ref}" --jq .sha)"
+          source_sha="$(gh api "repos/Pumpkin-MC/Pumpkin/commits/${source_ref}" --jq .sha)"
           if [[ -z "${source_sha}" || "${source_sha}" == "null" ]]; then
-            echo "::error::Could not resolve Pumpkin ref '${ref}'"
+            echo "::error::Could not resolve Pumpkin ref '${source_ref}'"
             exit 1
           fi
-
-          short_sha="${source_sha:0:7}"
-          release_tag=""
-          prerelease="false"
-          make_latest="false"
-          version="${ref}@${short_sha}"
-
-          if [[ "${channel}" == "nightly" ]]; then
-            release_tag="pumpkin-nightly-$(date -u +%Y%m%d)-${short_sha}"
-            prerelease="true"
-          elif [[ "${channel}" == "release" ]]; then
-            release_tag="pumpkin-${ref//\//-}"
-            make_latest="true"
-          fi
-
           {
-            echo "channel=${channel}"
-            echo "source_ref=${ref}"
+            echo "source_ref=${source_ref}"
             echo "source_sha=${source_sha}"
-            echo "version=${version}"
-            echo "release_tag=${release_tag}"
-            echo "prerelease=${prerelease}"
-            echo "make_latest=${make_latest}"
           } >> "${GITHUB_OUTPUT}"
-
-          echo "Channel: ${channel}"
-          echo "Pumpkin ref: ${ref}"
-          echo "Pumpkin commit: ${source_sha}"
+          echo "Validating upstream ${source_ref} (${source_sha})"
 
   build-engine:
     name: Build engine — ${{ matrix.android_abi }}
@@ -204,83 +137,3 @@ jobs:
           path: dist/libpumpkin_engine-${{ matrix.android_abi }}.so
           if-no-files-found: error
           retention-days: 14
-
-  publish-engine:
-    name: Publish independent engine release
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    needs: [resolve-source, build-engine]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Download architecture libraries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: engine-*
-          path: dist
-          merge-multiple: true
-
-      - name: Generate release manifest and notes
-        env:
-          CHANNEL: ${{ needs.resolve-source.outputs.channel }}
-          VERSION: ${{ needs.resolve-source.outputs.version }}
-          SOURCE_REF: ${{ needs.resolve-source.outputs.source_ref }}
-          SOURCE_SHA: ${{ needs.resolve-source.outputs.source_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            test -s "dist/libpumpkin_engine-${abi}.so"
-          done
-
-          a64="libpumpkin_engine-arm64-v8a.so"
-          a32="libpumpkin_engine-armeabi-v7a.so"
-          x64="libpumpkin_engine-x86_64.so"
-
-          jq -n \
-            --arg channel "${CHANNEL}" \
-            --arg version "${VERSION}" \
-            --arg sourceRef "${SOURCE_REF}" \
-            --arg sourceSha "${SOURCE_SHA}" \
-            --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg a64 "${a64}" --arg a64sha "$(sha256sum "dist/${a64}" | cut -d' ' -f1)" \
-            --arg a32 "${a32}" --arg a32sha "$(sha256sum "dist/${a32}" | cut -d' ' -f1)" \
-            --arg x64 "${x64}" --arg x64sha "$(sha256sum "dist/${x64}" | cut -d' ' -f1)" \
-            '{
-              schemaVersion: 1,
-              engine: "Pumpkin-MC",
-              channel: $channel,
-              version: $version,
-              sourceRef: $sourceRef,
-              sourceSha: $sourceSha,
-              builtAt: $builtAt,
-              assets: {
-                "arm64-v8a": {name: $a64, sha256: $a64sha},
-                "armeabi-v7a": {name: $a32, sha256: $a32sha},
-                "x86_64": {name: $x64, sha256: $x64sha}
-              }
-            }' > dist/manifest.json
-
-          cat > dist/RELEASE_NOTES.md <<EOF
-          ## Pumpkin Android engine
-
-          - Channel: ${CHANNEL}
-          - Upstream ref: ${SOURCE_REF}
-          - Upstream commit: ${SOURCE_SHA}
-          - Architectures: arm64-v8a, armeabi-v7a, x86_64
-          - Published by PumpkinLauncher Engine CI.
-          EOF
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.resolve-source.outputs.release_tag }}
-          name: Pumpkin Engine ${{ needs.resolve-source.outputs.version }}
-          body_path: dist/RELEASE_NOTES.md
-          prerelease: ${{ needs.resolve-source.outputs.prerelease }}
-          make_latest: ${{ needs.resolve-source.outputs.make_latest }}
-          files: |
-            dist/libpumpkin_engine-*.so
-            dist/manifest.json
-          fail_on_unmatched_files: true
-          overwrite_files: true
