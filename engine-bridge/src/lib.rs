@@ -13,6 +13,7 @@ use pumpkin_core::{
 use pumpkin_wasm_host::WasmPluginLoader;
 use std::{
     fs,
+    os::fd::{AsRawFd, RawFd},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -21,6 +22,12 @@ use std::{
     thread,
 };
 use tokio::runtime::{Builder, Handle};
+
+extern "C" {
+    fn dup(fd: i32) -> i32;
+    fn dup2(oldfd: i32, newfd: i32) -> i32;
+    fn close(fd: i32) -> i32;
+}
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -51,6 +58,47 @@ impl Drop for WorkingDirectoryGuard {
 
 struct RunningGuard;
 
+// Pumpkin answers console commands with println!, which goes to stdout. The
+// launcher only reads the engine log file, so stdout must point at it or every
+// command reply ("help", "list", ...) is lost on Android.
+struct StdoutRedirect {
+    original: RawFd,
+}
+
+impl StdoutRedirect {
+    fn install(log_file: &str) -> Result<Self, String> {
+        if let Some(parent) = Path::new(log_file).parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(log_file)
+            .map_err(|error| error.to_string())?;
+        // SAFETY: only manipulates this process's own file descriptors.
+        let original = unsafe { dup(1) };
+        if original < 0 {
+            return Err("could not duplicate the stdout descriptor".to_string());
+        }
+        if unsafe { dup2(file.as_raw_fd(), 1) } < 0 {
+            unsafe { close(original) };
+            return Err("could not redirect stdout to the engine log".to_string());
+        }
+        Ok(Self { original })
+    }
+}
+
+impl Drop for StdoutRedirect {
+    fn drop(&mut self) {
+        // SAFETY: restores the descriptor captured during install().
+        unsafe {
+            dup2(self.original, 1);
+            close(self.original);
+        }
+    }
+}
+
 impl Drop for RunningGuard {
     fn drop(&mut self) {
         if let Ok(mut slot) = server_slot().lock() {
@@ -77,9 +125,9 @@ fn java_string(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<String, Strin
         .map_err(|error| error.to_string())
 }
 
-fn run_engine(work_dir: String, log_file: String) -> Result<(), String> {
+fn run_engine(work_dir: String, log_file: &str) -> Result<(), String> {
     fs::create_dir_all(&work_dir).map_err(|error| error.to_string())?;
-    if let Some(parent) = Path::new(&log_file).parent() {
+    if let Some(parent) = Path::new(log_file).parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     // Pumpkin currently resolves some runtime paths relative to cwd. Keep this
@@ -89,7 +137,9 @@ fn run_engine(work_dir: String, log_file: String) -> Result<(), String> {
     let _working_directory = WorkingDirectoryGuard::enter(&work_dir)?;
 
     let mut config = PumpkinConfig::load(Path::new(&work_dir));
-    config.advanced.logging.file = log_file;
+    // The file logger is disabled: stdout already carries every log line plus
+    // command replies, and two writers on one file would corrupt it.
+    config.advanced.logging.file = String::new();
     config.advanced.logging.color = false;
     config.advanced.commands.use_console = false;
     config.advanced.commands.use_tty = false;
@@ -185,7 +235,15 @@ pub extern "system" fn Java_com_blizzardfire_pumpkinlauncher_PumpkinNative_nativ
         .name("Pumpkin-Engine".to_string())
         .spawn(move || {
             let _running_guard = RunningGuard;
-            if let Err(error) = run_engine(work_dir, log_file) {
+            // Keep stdout attached to the log until the final error is reported.
+            let _stdout_redirect = match StdoutRedirect::install(&log_file) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    eprintln!("Could not redirect engine stdout to the log: {error}");
+                    None
+                }
+            };
+            if let Err(error) = run_engine(work_dir, &log_file) {
                 tracing::error!("Pumpkin engine stopped with an error: {error}");
             }
             if let Ok(mut slot) = server_slot().lock() {

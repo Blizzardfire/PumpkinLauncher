@@ -63,7 +63,10 @@ class PumpkinService : Service() {
 
             val workDir = WorldManager.getActiveWorldDir(this)
             val logFile = File(filesDir, "engine-logs/latest.log")
-            val initialOffset = if (logFile.isFile) logFile.length() else 0L
+            logFile.parentFile?.mkdirs()
+            // The engine redirects its stdout into this file, so each session starts clean.
+            logFile.delete()
+            val initialOffset = 0L
 
             broadcastLog("Starting Pumpkin engine ${EngineModuleManager.activeVersion(this) ?: ""}...")
             val startResult = PumpkinNative.nativeStart(workDir.absolutePath, logFile.absolutePath)
