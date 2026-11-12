@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Process
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -18,6 +19,7 @@ import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.zip.ZipInputStream
 
 data class EngineRelease(
     val tagName: String,
@@ -61,6 +63,7 @@ object EngineModuleManager {
     private const val MIN_BYTES_PER_CONNECTION = 2L * 1024L * 1024L
     private const val SMALL_DOWNLOAD_SINGLE_CONNECTION = 4L * 1024L * 1024L
     private const val DOWNLOAD_BUFFER_SIZE = 64 * 1024
+    private const val MAX_EXTRACTED_BYTES = 512L * 1024L * 1024L
     private val supportedAbis = setOf("arm64-v8a", "armeabi-v7a", "x86_64")
     private val activeConnections = ConcurrentHashMap<AtomicBoolean, MutableSet<HttpURLConnection>>()
 
@@ -70,8 +73,15 @@ object EngineModuleManager {
             ?: throw IllegalStateException("This app process does not have a supported Android ABI.")
     }
 
+    // Maps a release tag to its channel, or null when the tag belongs to no channel.
+    internal fun channelFor(tag: String, prerelease: Boolean): String? = when {
+        tag.startsWith("pumpkin-") && !prerelease -> "release"
+        tag.startsWith("nightly") -> "nightly"
+        else -> null
+    }
+
     fun fetchReleases(channel: String): List<EngineRelease> {
-        require(channel == "release")
+        require(channel == "release" || channel == "nightly")
         val connection = openConnection(
             "https://api.github.com/repos/$OWNER/$REPOSITORY/releases?per_page=50"
         )
@@ -83,11 +93,11 @@ object EngineModuleManager {
 
         val releases = org.json.JSONArray(body)
         val result = mutableListOf<EngineRelease>()
-        val versionTag = Regex("^v\\d+(?:\\.\\d+){1,2}(?:[-+][0-9A-Za-z.-]+)?$")
         for (index in 0 until releases.length()) {
             val release = releases.getJSONObject(index)
             val tag = release.optString("tag_name")
-            if (!tag.matches(versionTag) || release.optBoolean("draft") || release.optBoolean("prerelease")) {
+            val prerelease = release.optBoolean("prerelease")
+            if (release.optBoolean("draft") || channelFor(tag, prerelease) != channel) {
                 continue
             }
 
@@ -106,7 +116,7 @@ object EngineModuleManager {
                 tagName = tag,
                 name = release.optString("name", tag),
                 publishedAt = release.optString("published_at"),
-                prerelease = false,
+                prerelease = prerelease,
                 manifestUrl = manifestUrl,
                 assetUrls = urls
             )
@@ -144,6 +154,16 @@ object EngineModuleManager {
         if (assetName.isBlank() || assetName.contains('/') || assetName.contains('\\')) {
             throw SecurityException("The engine manifest contains an invalid asset name.")
         }
+        val isZip = assetName.endsWith(".zip", ignoreCase = true)
+        val expectedContentSha = asset.optString("contentSha256").lowercase().ifBlank { null }
+        if (expectedContentSha != null &&
+            (expectedContentSha.length != 64 || expectedContentSha.any { it !in "0123456789abcdef" })
+        ) {
+            throw SecurityException("The engine manifest contains an invalid content SHA-256 checksum.")
+        }
+        if (isZip && expectedContentSha == null) {
+            throw IllegalStateException("The engine manifest is missing the content checksum for $assetName.")
+        }
         val downloadUrl = asset.optString("url").ifBlank {
             release.assetUrls[assetName]
                 ?: throw IllegalStateException("The engine manifest is missing the download URL for $assetName.")
@@ -159,7 +179,9 @@ object EngineModuleManager {
         }
 
         val destination = File(versionDir, "libpumpkin_engine.so")
-        if (destination.isFile && sha256(destination) == expectedSha256) {
+        // Installed library hash: the content hash for zip packages, the asset hash for legacy .so releases.
+        val installedSha = if (isZip) expectedContentSha else expectedSha256
+        if (destination.isFile && installedSha != null && sha256(destination) == installedSha) {
             if (destination.canWrite() && !destination.setReadOnly()) {
                 throw IllegalStateException("Could not make the installed engine library read-only.")
             }
@@ -174,12 +196,25 @@ object EngineModuleManager {
 
         val temporary = File(versionDir, "engine.download")
         if (temporary.exists()) temporary.delete()
+        val extracted = File(versionDir, "engine.extracted")
+        if (extracted.exists()) extracted.delete()
         try {
             downloadAsset(downloadUrl, temporary, cancelled, onProgress)
 
             checkNotCancelled(cancelled)
             if (sha256(temporary) != expectedSha256) {
                 throw SecurityException("Engine checksum verification failed.")
+            }
+
+            // Zip packages hold one stripped .so; legacy releases ship the bare library directly.
+            val prepared = if (isZip) {
+                extractLibrary(temporary, extracted, cancelled)
+                if (sha256(extracted) != expectedContentSha) {
+                    throw SecurityException("Engine content checksum verification failed.")
+                }
+                extracted
+            } else {
+                temporary
             }
 
             // Preserve the previous known-good library until the replacement is verified and installed.
@@ -192,7 +227,7 @@ object EngineModuleManager {
                 throw IllegalStateException("Could not preserve the previous engine library.")
             }
             try {
-                if (!temporary.renameTo(destination)) {
+                if (!prepared.renameTo(destination)) {
                     throw IllegalStateException("Could not install the downloaded engine library.")
                 }
                 if (!destination.setReadable(true, true) || !destination.setReadOnly()) {
@@ -208,6 +243,7 @@ object EngineModuleManager {
                 }
                 throw installError
             }
+            temporary.delete()
             return InstalledEngine(
                 manifest.optString("version", release.tagName),
                 manifest.optString("channel", if (release.prerelease) "nightly" else "release"),
@@ -216,6 +252,56 @@ object EngineModuleManager {
             )
         } catch (error: Exception) {
             temporary.delete()
+            extracted.delete()
+            throw error
+        }
+    }
+
+    // Unpacks the single library entry of a release archive, rejecting traversal names and oversized entries.
+    internal fun extractLibrary(
+        archive: File,
+        destination: File,
+        cancelled: AtomicBoolean = AtomicBoolean(false)
+    ) {
+        if (destination.exists() && !destination.delete()) {
+            throw IllegalStateException("Could not prepare the engine extraction target.")
+        }
+        var extracted = false
+        try {
+            ZipInputStream(BufferedInputStream(FileInputStream(archive))).use { zip ->
+                while (true) {
+                    checkNotCancelled(cancelled)
+                    val entry = zip.nextEntry ?: break
+                    if (entry.isDirectory) continue
+                    val name = entry.name
+                    if (name.contains('/') || name.contains('\\') || name.contains("..") ||
+                        !name.endsWith(".so")
+                    ) {
+                        throw SecurityException("Engine archive contains an unexpected entry: $name")
+                    }
+                    if (extracted) {
+                        throw SecurityException("Engine archive contains more than one library.")
+                    }
+                    FileOutputStream(destination).use { output ->
+                        val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+                        var total = 0L
+                        while (true) {
+                            checkNotCancelled(cancelled)
+                            val count = zip.read(buffer)
+                            if (count < 0) break
+                            total += count
+                            if (total > MAX_EXTRACTED_BYTES) {
+                                throw SecurityException("Engine archive entry exceeds the size limit.")
+                            }
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                    extracted = true
+                }
+            }
+            if (!extracted) throw SecurityException("Engine archive does not contain a library.")
+        } catch (error: Exception) {
+            destination.delete()
             throw error
         }
     }
