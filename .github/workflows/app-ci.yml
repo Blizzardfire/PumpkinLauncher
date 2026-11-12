@@ -3,7 +3,7 @@ name: Android App CI
 on:
   workflow_dispatch:
   pull_request:
-    branches: [master]
+    branches: [master, feat/engine-manager-parallel-download]
     paths:
       - "app/**"
       - "gradle/**"
